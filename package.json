@@ -1,0 +1,27 @@
+{
+  "name": "fb-account-manager",
+  "version": "1.0.0",
+  "description": "Facebook Account Management System with MCP Integration",
+  "private": true,
+  "workspaces": [
+    "frontend",
+    "mcp-servers/*"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev:frontend\" \"npm run dev:mcp\"",
+    "dev:frontend": "cd frontend && npm run dev",
+    "dev:mcp": "cd mcp-servers/facebook-mcp && npm run dev",
+    "build": "npm run build:frontend && npm run build:mcp",
+    "build:frontend": "cd frontend && npm run build",
+    "build:mcp": "cd mcp-servers/facebook-mcp && npm run build",
+    "start": "npm run start:frontend",
+    "start:frontend": "cd frontend && npm run start"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
