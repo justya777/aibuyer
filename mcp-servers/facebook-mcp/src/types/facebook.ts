@@ -1,10 +1,8 @@
-// Shared types from the main shared directory
 export interface FacebookPage {
   id: string;
   name: string;
   category: string;
-  tasks: string[]; // Permissions like 'MANAGE', 'CREATE_CONTENT', 'ADVERTISE'
-  accessToken?: string;
+  tasks: string[];
   createdAt?: Date;
 }
 
@@ -16,7 +14,6 @@ export interface FacebookAccount {
   timezone: string;
   lastActivity: Date;
   createdAt: Date;
-  
   metrics: {
     ctr: number;
     cpm: number;
@@ -29,7 +26,6 @@ export interface FacebookAccount {
     reach: number;
     frequency: number;
   };
-  
   activeCampaigns: number;
   totalCampaigns: number;
 }
@@ -90,7 +86,7 @@ export interface FacebookAdSet {
     interests?: string[];
     behaviors?: string[];
     customAudiences?: string[];
-    locales?: number[]; // Language targeting using Facebook locale IDs
+    locales?: number[];
   };
   performance: {
     spend: number;
@@ -121,7 +117,7 @@ export interface FacebookAd {
     imageUrl?: string;
     videoUrl?: string;
     linkUrl?: string;
-    urlParameters?: string; // URL tracking parameters (e.g., utm_campaign={{campaign.name}}&pixel=test)
+    urlParameters?: string;
     callToAction?: string;
     displayLink?: string;
   };
@@ -154,24 +150,31 @@ export interface FacebookInsights {
   totalCampaigns?: number;
 }
 
-// MCP Tool Parameter Types
-export interface GetAccountsParams {
+interface TenantScoped {
+  tenantId?: string;
+}
+
+interface TenantRequired {
+  tenantId: string;
+}
+
+export interface GetAccountsParams extends TenantScoped {
   limit?: number;
   fields?: string[];
 }
 
-export interface GetPagesParams {
+export interface GetPagesParams extends TenantScoped {
   limit?: number;
   fields?: string[];
 }
 
-export interface GetCampaignsParams {
+export interface GetCampaignsParams extends TenantScoped {
   accountId: string;
   limit?: number;
   status?: string[];
 }
 
-export interface CreateCampaignParams {
+export interface CreateCampaignParams extends TenantRequired {
   accountId: string;
   name: string;
   objective: string;
@@ -192,7 +195,7 @@ export interface CreateCampaignParams {
   };
 }
 
-export interface UpdateCampaignParams {
+export interface UpdateCampaignParams extends TenantRequired {
   campaignId: string;
   name?: string;
   status?: string;
@@ -200,7 +203,7 @@ export interface UpdateCampaignParams {
   lifetimeBudget?: number;
 }
 
-export interface GetInsightsParams {
+export interface GetInsightsParams extends TenantScoped {
   accountId?: string;
   campaignId?: string;
   adSetId?: string;
@@ -210,14 +213,13 @@ export interface GetInsightsParams {
   datePreset?: string;
 }
 
-// Ad Set Parameter Types
-export interface GetAdSetsParams {
+export interface GetAdSetsParams extends TenantScoped {
   campaignId: string;
   limit?: number;
   status?: string[];
 }
 
-export interface CreateAdSetParams {
+export interface CreateAdSetParams extends TenantRequired {
   accountId: string;
   campaignId: string;
   name: string;
@@ -239,11 +241,11 @@ export interface CreateAdSetParams {
     interests?: string[];
     behaviors?: string[];
     customAudiences?: string[];
-    locales?: number[]; // Language targeting using Facebook locale IDs
+    locales?: Array<number | string>;
   };
 }
 
-export interface UpdateAdSetParams {
+export interface UpdateAdSetParams extends TenantRequired {
   adSetId: string;
   name?: string;
   status?: string;
@@ -253,15 +255,14 @@ export interface UpdateAdSetParams {
   lifetimeBudget?: number;
 }
 
-// Ad Parameter Types
-export interface GetAdsParams {
+export interface GetAdsParams extends TenantScoped {
   adSetId?: string;
   campaignId?: string;
   limit?: number;
   status?: string[];
 }
 
-export interface CreateAdParams {
+export interface CreateAdParams extends TenantRequired {
   accountId: string;
   adSetId: string;
   name: string;
@@ -272,13 +273,13 @@ export interface CreateAdParams {
     imageUrl?: string;
     videoUrl?: string;
     linkUrl?: string;
-    urlParameters?: string; // URL tracking parameters (e.g., utm_campaign={{campaign.name}}&pixel=test)
+    urlParameters?: string;
     callToAction?: string;
     displayLink?: string;
   };
 }
 
-export interface UpdateAdParams {
+export interface UpdateAdParams extends TenantRequired {
   adId: string;
   name?: string;
   status?: string;
@@ -288,22 +289,46 @@ export interface UpdateAdParams {
     imageUrl?: string;
     videoUrl?: string;
     linkUrl?: string;
-    urlParameters?: string; // URL tracking parameters (e.g., utm_campaign={{campaign.name}}&pixel=test)
+    urlParameters?: string;
     callToAction?: string;
     displayLink?: string;
   };
 }
 
-// Facebook API Response Types
+export interface DuplicateCampaignOptions extends TenantRequired {
+  deepCopy?: boolean;
+  renameStrategy?: 'DEEP_RENAME' | 'ONLY_TOP_LEVEL_RENAME' | 'NO_RENAME';
+  renamePrefix?: string;
+  renameSuffix?: string;
+  statusOption?: 'ACTIVE' | 'PAUSED' | 'INHERITED_FROM_SOURCE';
+}
+
+export interface DuplicateAdSetOptions extends TenantRequired {
+  campaignId?: string;
+  deepCopy?: boolean;
+  renameStrategy?: 'DEEP_RENAME' | 'ONLY_TOP_LEVEL_RENAME' | 'NO_RENAME';
+  renamePrefix?: string;
+  renameSuffix?: string;
+  statusOption?: 'ACTIVE' | 'PAUSED' | 'INHERITED_FROM_SOURCE';
+}
+
+export interface DuplicateAdOptions extends TenantRequired {
+  adSetId?: string;
+  renameStrategy?: 'NO_RENAME' | 'ONLY_TOP_LEVEL_RENAME';
+  renamePrefix?: string;
+  renameSuffix?: string;
+  statusOption?: 'ACTIVE' | 'PAUSED' | 'INHERITED_FROM_SOURCE';
+}
+
 export interface FacebookApiError {
   message: string;
   type: string;
   code: number;
   error_subcode?: number;
-  fbtrace_id: string;
+  fbtrace_id?: string;
 }
 
-export interface FacebookApiResponse<T = any> {
+export interface FacebookApiResponse<T = unknown> {
   data?: T;
   error?: FacebookApiError;
   paging?: {

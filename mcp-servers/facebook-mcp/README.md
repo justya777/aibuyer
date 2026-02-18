@@ -1,14 +1,14 @@
 # Facebook MCP Server
 
-A Model Context Protocol (MCP) server for Facebook Marketing API integration, enabling AI agents to manage Facebook advertising accounts, campaigns, and retrieve performance insights.
+A Model Context Protocol (MCP) server for Facebook Marketing API integration with multi-tenant System User token routing, policy controls, tenant isolation, and centralized Graph API request handling.
 
 ## Features
 
-- **Account Management**: Retrieve Facebook ad accounts with metrics
-- **Campaign Operations**: Create, update, and manage advertising campaigns
-- **Performance Insights**: Get detailed metrics and analytics data
-- **Real-time Data**: Fetch live data from Facebook Marketing API
-- **Mock Mode**: Development mode with mock data when API credentials are not available
+- **Multi-tenant token routing**: `TokenProvider.getToken(ctx)` resolves tenant-scoped System User tokens
+- **Tenant isolation**: tenant-to-ad-account access checks for reads and mutations
+- **Central Graph client**: retries/backoff and rate-limit header parsing (`X-App-Usage`, `X-Ad-Account-Usage`, `X-Business-Use-Case-Usage`)
+- **Policy engine**: explicit budget requirement, mutation-rate caps, risky-operation warnings
+- **Insights cache**: in-memory cache for repeated insights queries
 
 ## Installation
 
@@ -27,15 +27,40 @@ npm install
 
 2. Create a `.env` file:
 ```bash
-# Facebook App Configuration
-FB_APP_ID=your_facebook_app_id
-FB_APP_SECRET=your_facebook_app_secret
-FB_ACCESS_TOKEN=your_facebook_access_token
-
 # Server Configuration
 NODE_ENV=development
 LOG_LEVEL=info
 PORT=3001
+
+# Graph API
+GRAPH_API_VERSION=v23.0
+GRAPH_MAX_RETRIES=3
+GRAPH_BASE_DELAY_MS=300
+GRAPH_MAX_DELAY_MS=3000
+GRAPH_RETRY_JITTER_MS=100
+INSIGHTS_CACHE_TTL_MS=60000
+
+# Multi-tenant token map (dev mode)
+# tenantId -> token
+TENANT_SU_TOKEN_MAP={"tenant-a":"EAAB...","tenant-b":"EAAB..."}
+
+# Multi-tenant access map
+# tenantId -> { allowedAdAccountIds, systemUserTokenRef }
+TENANT_ACCESS_MAP={
+  "tenant-a":{"allowedAdAccountIds":["act_123"],"systemUserTokenRef":"tenant-a"},
+  "tenant-b":{"allowedAdAccountIds":["act_456"],"systemUserTokenRef":"tenant-b"}
+}
+
+# Policy defaults (allow_with_warning | block)
+POLICY_ENFORCEMENT_MODE=allow_with_warning
+POLICY_MAX_BUDGET_INCREASE_PERCENT=50
+POLICY_MAX_MUTATIONS_PER_TENANT_PER_HOUR=120
+POLICY_BROAD_TARGETING_AGE_SPAN_THRESHOLD=35
+
+# Optional ad/DSA fields
+FB_PAGE_ID=your_page_id
+FB_DSA_BENEFICIARY=your_company_name
+FB_DSA_PAYOR=your_company_name
 ```
 
 ## Usage
@@ -180,13 +205,36 @@ The MCP server communicates with the frontend application through the Model Cont
 ### Project Structure
 ```
 src/
-├── index.ts              # Main MCP server entry point
+├── config/
+│   └── env.ts                     # Single-load env parsing
+├── fb/
+│   ├── core/
+│   │   ├── graph-client.ts        # Central Graph API request pipeline
+│   │   ├── policy-engine.ts       # Mutation policy checks
+│   │   ├── tenant-registry.ts     # Tenant/account isolation mapping
+│   │   ├── token-provider.ts      # Tenant token abstraction
+│   │   └── types.ts
+│   ├── accounts.ts
+│   ├── campaigns.ts
+│   ├── adsets.ts
+│   ├── ads.ts
+│   ├── insights.ts
+│   ├── targeting.ts
+│   └── FacebookServiceFacade.ts   # Backward-compatible facade
+├── mcp/
+│   ├── tools.ts                   # Tool schemas/definitions
+│   └── handlers.ts                # Tool handlers/dispatch
 ├── services/
-│   └── FacebookService.ts # Facebook API integration
+│   └── FacebookService.ts         # Compatibility shim
+├── __tests__/
+│   ├── token-provider.test.ts
+│   ├── graph-client.test.ts
+│   ├── policy-engine.test.ts
+│   └── security-no-token-leak.test.ts
 ├── types/
-│   └── facebook.ts       # Type definitions
+│   └── facebook.ts
 └── utils/
-    └── logger.ts         # Logging utility
+    └── logger.ts                  # Logging + redaction
 ```
 
 ### Testing
