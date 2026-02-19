@@ -19,9 +19,48 @@ interface AccountsGridProps {
   selectedAccount: FacebookAccount | null
   onSelectAccount: (account: FacebookAccount) => void
   campaignRefreshKey?: number
+  onAccountsChanged?: () => Promise<void> | void
 }
 
-export default function AccountsGrid({ accounts, selectedAccount, onSelectAccount, campaignRefreshKey }: AccountsGridProps) {
+export default function AccountsGrid({
+  accounts,
+  selectedAccount,
+  onSelectAccount,
+  campaignRefreshKey,
+  onAccountsChanged,
+}: AccountsGridProps) {
+  const [newAdAccountId, setNewAdAccountId] = useState('')
+  const [isAddingAccount, setIsAddingAccount] = useState(false)
+  const [addAccountMessage, setAddAccountMessage] = useState<string | null>(null)
+
+  const handleAddAdAccount = async () => {
+    if (!newAdAccountId.trim()) return
+    setIsAddingAccount(true)
+    setAddAccountMessage(null)
+    try {
+      const response = await fetch('/api/tenant-assets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ adAccountId: newAdAccountId.trim() }),
+      })
+
+      const payload = await response.json()
+      if (!response.ok || !payload?.success) {
+        throw new Error(payload?.error || 'Failed to add ad account.')
+      }
+
+      setAddAccountMessage(`Added ${payload.asset.adAccountId}. Refreshing accounts...`)
+      setNewAdAccountId('')
+      if (onAccountsChanged) {
+        await onAccountsChanged()
+      }
+    } catch (error) {
+      setAddAccountMessage(error instanceof Error ? error.message : 'Failed to add ad account.')
+    } finally {
+      setIsAddingAccount(false)
+    }
+  }
+
   if (selectedAccount) {
     return <AccountDetails account={selectedAccount} campaignRefreshKey={campaignRefreshKey} />
   }
@@ -43,16 +82,32 @@ export default function AccountsGrid({ accounts, selectedAccount, onSelectAccoun
           <ChartBarIcon className="w-16 h-16 text-gray-300 mx-auto mb-4" />
           <h3 className="text-lg font-semibold text-gray-900 mb-2">No Facebook accounts found</h3>
           <p className="text-gray-500 mb-6 max-w-md mx-auto">
-            Make sure you have a valid Facebook User Access Token with Marketing API permissions in your .env file.
+            No ad accounts are assigned to this tenant yet. Add an `act_...` account below.
           </p>
           <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 max-w-lg mx-auto">
-            <h4 className="text-sm font-medium text-gray-900 mb-2">Need help?</h4>
-            <p className="text-sm text-gray-600">
-              1. Get a User Access Token from Facebook Graph API Explorer<br/>
-              2. Add permissions: ads_management, ads_read, business_management<br/>
-              3. Update FB_ACCESS_TOKEN in your .env file<br/>
-              4. Restart the server
+            <h4 className="text-sm font-medium text-gray-900 mb-2">Assign ad account to tenant</h4>
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={newAdAccountId}
+                onChange={(event) => setNewAdAccountId(event.target.value)}
+                placeholder="act_1234567890"
+                className="flex-1 border border-gray-300 rounded-md px-3 py-2 text-sm"
+              />
+              <button
+                onClick={handleAddAdAccount}
+                disabled={isAddingAccount || !newAdAccountId.trim()}
+                className="px-3 py-2 bg-facebook-600 text-white rounded-md text-sm disabled:opacity-50"
+              >
+                {isAddingAccount ? 'Adding...' : 'Add'}
+              </button>
+            </div>
+            <p className="text-xs text-gray-500 mt-2">
+              This stores the mapping in `TenantAsset`, then account listing is filtered by tenant.
             </p>
+            {addAccountMessage ? (
+              <p className="text-xs mt-2 text-gray-700">{addAccountMessage}</p>
+            ) : null}
           </div>
         </div>
       ) : (

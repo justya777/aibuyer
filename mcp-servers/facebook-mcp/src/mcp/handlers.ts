@@ -57,7 +57,12 @@ export class FacebookToolHandlers {
       }
       case 'get_promotable_pages': {
         const parsed = parseArgs(GetPromotablePagesSchema, args);
-        return this.facebookService.getPromotablePages(parsed.accountId, parsed.tenantId);
+        return this.facebookService.getPromotablePages(
+          parsed.accountId,
+          parsed.tenantId,
+          parsed.userId,
+          parsed.isPlatformAdmin
+        );
       }
       case 'get_campaigns': {
         const parsed = parseArgs(GetCampaignsSchema, args);

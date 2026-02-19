@@ -1,6 +1,10 @@
 import axios, { type AxiosRequestConfig, type AxiosResponse } from 'axios';
 import type { GraphRetryConfig } from '../../config/env.js';
 import { logger } from '../../utils/logger.js';
+import { normalizeAdAccountId, TenantRegistry } from './tenant-registry.js';
+import {
+  TenantIsolationError,
+} from './types.js';
 import type {
   GraphRateLimitUsage,
   GraphRequest,
@@ -35,6 +39,7 @@ export class GraphApiError extends Error {
 interface GraphClientOptions {
   apiVersion: string;
   retry: GraphRetryConfig;
+  tenantRegistry?: TenantRegistry;
   httpClient?: HttpClient;
   sleepFn?: (ms: number) => Promise<void>;
   baseUrl?: string;
@@ -83,6 +88,7 @@ export class GraphClient {
   private readonly tokenProvider: TokenProvider;
   private readonly apiVersion: string;
   private readonly retry: GraphRetryConfig;
+  private readonly tenantRegistry?: TenantRegistry;
   private readonly httpClient: HttpClient;
   private readonly sleepFn: (ms: number) => Promise<void>;
   private readonly baseUrl: string;
@@ -91,12 +97,14 @@ export class GraphClient {
     this.tokenProvider = tokenProvider;
     this.apiVersion = options.apiVersion;
     this.retry = options.retry;
+    this.tenantRegistry = options.tenantRegistry;
     this.httpClient = options.httpClient || axios.create();
     this.sleepFn = options.sleepFn || ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.baseUrl = options.baseUrl || 'https://graph.facebook.com';
   }
 
   async request<T = unknown>(ctx: RequestContext, request: GraphRequest): Promise<GraphResponse<T>> {
+    await this.enforceTenantIsolation(ctx, request);
     const url = `${this.baseUrl}/${this.apiVersion}/${normalizePath(request.path)}`;
     const maxAttempts = this.retry.maxRetries + 1;
 
@@ -201,5 +209,115 @@ export class GraphClient {
       }
     }
     return normalized;
+  }
+
+  private async enforceTenantIsolation(ctx: RequestContext, request: GraphRequest): Promise<void> {
+    if (!this.tenantRegistry) return;
+
+    await this.tenantRegistry.assertTenantAccessible(
+      ctx.tenantId,
+      ctx.userId,
+      Boolean(ctx.isPlatformAdmin)
+    );
+
+    const accountIds = new Set<string>();
+    const campaignIds = new Set<string>();
+    const adSetIds = new Set<string>();
+    const adIds = new Set<string>();
+
+    if (ctx.adAccountId) accountIds.add(normalizeAdAccountId(ctx.adAccountId));
+    if (ctx.campaignId) campaignIds.add(ctx.campaignId);
+    if (ctx.adSetId) adSetIds.add(ctx.adSetId);
+    if (ctx.adId) adIds.add(ctx.adId);
+
+    const pathHead = normalizePath(request.path).split('/')[0];
+    if (pathHead.startsWith('act_')) {
+      accountIds.add(normalizeAdAccountId(pathHead));
+    }
+
+    this.collectIdsFromUnknown(request.query, accountIds, campaignIds, adSetIds, adIds);
+    this.collectIdsFromUnknown(request.body, accountIds, campaignIds, adSetIds, adIds);
+
+    for (const campaignId of campaignIds) {
+      const accountId = await this.resolveAccountIdForResource(ctx, campaignId);
+      accountIds.add(accountId);
+    }
+    for (const adSetId of adSetIds) {
+      const accountId = await this.resolveAccountIdForResource(ctx, adSetId);
+      accountIds.add(accountId);
+    }
+    for (const adId of adIds) {
+      const accountId = await this.resolveAccountIdForResource(ctx, adId);
+      accountIds.add(accountId);
+    }
+
+    for (const accountId of accountIds) {
+      await this.tenantRegistry.assertAdAccountAllowed(
+        ctx.tenantId,
+        accountId,
+        ctx.userId,
+        Boolean(ctx.isPlatformAdmin)
+      );
+    }
+  }
+
+  private collectIdsFromUnknown(
+    value: unknown,
+    accountIds: Set<string>,
+    campaignIds: Set<string>,
+    adSetIds: Set<string>,
+    adIds: Set<string>
+  ): void {
+    if (!value || typeof value !== 'object') return;
+
+    for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+      const normalizedKey = key.toLowerCase();
+      const asString = typeof raw === 'string' ? raw : undefined;
+
+      if (
+        normalizedKey === 'account_id' ||
+        normalizedKey === 'accountid' ||
+        normalizedKey === 'ad_account_id' ||
+        normalizedKey === 'adaccountid'
+      ) {
+        if (asString) accountIds.add(normalizeAdAccountId(asString));
+      }
+
+      if (normalizedKey === 'campaign_id' || normalizedKey === 'campaignid') {
+        if (asString) campaignIds.add(asString);
+      }
+
+      if (
+        normalizedKey === 'adset_id' ||
+        normalizedKey === 'adsetid' ||
+        normalizedKey === 'ad_set_id' ||
+        normalizedKey === 'adset'
+      ) {
+        if (asString) adSetIds.add(asString);
+      }
+
+      if (normalizedKey === 'ad_id' || normalizedKey === 'adid') {
+        if (asString) adIds.add(asString);
+      }
+    }
+  }
+
+  private async resolveAccountIdForResource(ctx: RequestContext, resourceId: string): Promise<string> {
+    const token = await this.tokenProvider.getToken(ctx);
+    const url = `${this.baseUrl}/${this.apiVersion}/${normalizePath(resourceId)}`;
+    const response = await this.httpClient.request<Record<string, unknown>>({
+      method: 'GET',
+      url,
+      params: { fields: 'account_id', access_token: token },
+      timeout: 30_000,
+      validateStatus: () => true,
+    });
+
+    const accountId = response.data?.account_id ? String(response.data.account_id) : '';
+    if (!accountId) {
+      throw new TenantIsolationError(`Could not resolve account_id for resource ${resourceId}`);
+    }
+
+    return normalizeAdAccountId(accountId);
   }
 }

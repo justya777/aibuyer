@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { MCPClient } from '../../../../lib/mcp-client';
+import { AuthRequiredError, TenantAccessError, resolveTenantContext } from '@/lib/tenant-context';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -16,7 +17,8 @@ export async function GET(request: NextRequest) {
       }, { status: 400 });
     }
 
-    const mcpClient = new MCPClient();
+    const context = await resolveTenantContext(request);
+    const mcpClient = new MCPClient(context);
 
     // Call the Facebook MCP server to get campaigns (excluding problematic statuses)
     const rawCampaigns = await mcpClient.callTool('get_campaigns', {
@@ -42,15 +44,15 @@ export async function GET(request: NextRequest) {
     });
 
   } catch (error) {
-    console.error('Facebook campaigns API error:', error);
-    
-    // Return empty array instead of error so UI doesn't break
-    return NextResponse.json({
-      success: true,
-      campaigns: [],
-      count: 0,
-      error: error instanceof Error ? error.message : 'Unknown error',
-      fallback: true
-    });
+    if (error instanceof AuthRequiredError) {
+      return NextResponse.json({ success: false, error: error.message }, { status: 401 });
+    }
+    if (error instanceof TenantAccessError) {
+      return NextResponse.json({ success: false, error: error.message }, { status: 403 });
+    }
+    return NextResponse.json(
+      { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+      { status: 500 }
+    );
   }
 }

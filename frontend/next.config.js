@@ -1,7 +1,6 @@
-const path = require('path');
 const dotenv = require('dotenv');
+const path = require('path');
 
-// Load monorepo root env for local development.
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
 /** @type {import('next').NextConfig} */

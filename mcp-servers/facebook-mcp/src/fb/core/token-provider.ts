@@ -1,39 +1,23 @@
 import type { RequestContext } from './types.js';
-import { TenantRegistry } from './tenant-registry.js';
 
 export interface TokenProvider {
   getToken(ctx: RequestContext): Promise<string>;
 }
 
 export class EnvTokenProvider implements TokenProvider {
-  private readonly tenantTokenMap: Record<string, string>;
-  private readonly tenantRegistry: TenantRegistry;
+  private readonly globalToken: string;
 
-  constructor(tenantTokenMap: Record<string, string>, tenantRegistry: TenantRegistry) {
-    this.tenantTokenMap = tenantTokenMap;
-    this.tenantRegistry = tenantRegistry;
+  constructor(globalToken: string) {
+    this.globalToken = globalToken;
   }
 
+  // ctx is intentionally accepted for API compatibility and logging context.
+  // Token resolution is global due Meta system user limits.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   async getToken(ctx: RequestContext): Promise<string> {
-    const directToken = this.tenantTokenMap[ctx.tenantId];
-    if (directToken) {
-      return directToken;
+    if (!this.globalToken) {
+      throw new Error('Global Meta system user token is not configured.');
     }
-
-    const tokenRef = this.tenantRegistry.getSystemUserTokenRef(ctx.tenantId);
-    if (!tokenRef) {
-      throw new Error(
-        `No token mapping found for tenant ${ctx.tenantId}. Configure TENANT_SU_TOKEN_MAP and TENANT_ACCESS_MAP.`
-      );
-    }
-
-    const tokenByRef = this.tenantTokenMap[tokenRef];
-    if (!tokenByRef) {
-      throw new Error(
-        `No token found for tokenRef ${tokenRef} (tenant ${ctx.tenantId}) in TENANT_SU_TOKEN_MAP.`
-      );
-    }
-
-    return tokenByRef;
+    return this.globalToken;
   }
 }

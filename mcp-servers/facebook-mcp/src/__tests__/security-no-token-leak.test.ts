@@ -20,9 +20,10 @@ describe('security redaction', () => {
 
   it('redacts token patterns in strings', () => {
     const message =
-      'POST /x?access_token=token-value Authorization: Bearer token-value {"secret":"a1"}';
+      'POST /x?access_token=token-value&token=abc123 Authorization: Bearer token-value {"secret":"a1"}';
     const redacted = redactSensitivePayload(message);
     expect(redacted).toContain('access_token=[REDACTED]');
+    expect(redacted).toContain('token=[REDACTED]');
     expect(redacted).not.toContain('token-value');
     expect(redacted).toContain('"secret":"[REDACTED]"');
   });

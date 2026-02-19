@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { MCPClient } from '../../../../lib/mcp-client';
+import { AuthRequiredError, TenantAccessError, resolveTenantContext } from '@/lib/tenant-context';
 
 export async function GET(request: NextRequest) {
   try {
@@ -14,7 +15,8 @@ export async function GET(request: NextRequest) {
       }, { status: 400 });
     }
 
-    const mcpClient = new MCPClient();
+    const context = await resolveTenantContext(request);
+    const mcpClient = new MCPClient(context);
 
     // Call the Facebook MCP server to get ad sets
     const params: any = {
@@ -43,15 +45,16 @@ export async function GET(request: NextRequest) {
     });
 
   } catch (error) {
-    console.error('Facebook ad sets API error:', error);
-    
-    return NextResponse.json({
-      success: true,
-      adSets: [],
-      count: 0,
-      error: error instanceof Error ? error.message : 'Unknown error',
-      fallback: true
-    });
+    if (error instanceof AuthRequiredError) {
+      return NextResponse.json({ success: false, error: error.message }, { status: 401 });
+    }
+    if (error instanceof TenantAccessError) {
+      return NextResponse.json({ success: false, error: error.message }, { status: 403 });
+    }
+    return NextResponse.json(
+      { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+      { status: 500 }
+    );
   }
 }
 
@@ -78,7 +81,8 @@ export async function POST(request: NextRequest) {
       }, { status: 400 });
     }
 
-    const mcpClient = new MCPClient();
+    const context = await resolveTenantContext(request);
+    const mcpClient = new MCPClient(context);
 
     const adSetData = {
       accountId,
@@ -101,12 +105,16 @@ export async function POST(request: NextRequest) {
     });
 
   } catch (error) {
-    console.error('Facebook ad set creation error:', error);
-    
-    return NextResponse.json({
-      success: false,
-      error: error instanceof Error ? error.message : 'Failed to create ad set'
-    }, { status: 500 });
+    if (error instanceof AuthRequiredError) {
+      return NextResponse.json({ success: false, error: error.message }, { status: 401 });
+    }
+    if (error instanceof TenantAccessError) {
+      return NextResponse.json({ success: false, error: error.message }, { status: 403 });
+    }
+    return NextResponse.json(
+      { success: false, error: error instanceof Error ? error.message : 'Failed to create ad set' },
+      { status: 500 }
+    );
   }
 }
 
@@ -122,7 +130,8 @@ export async function PUT(request: NextRequest) {
       }, { status: 400 });
     }
 
-    const mcpClient = new MCPClient();
+    const context = await resolveTenantContext(request);
+    const mcpClient = new MCPClient(context);
 
     const updatedAdSet = await mcpClient.callTool('update_adset', {
       adSetId,
@@ -135,11 +144,15 @@ export async function PUT(request: NextRequest) {
     });
 
   } catch (error) {
-    console.error('Facebook ad set update error:', error);
-    
-    return NextResponse.json({
-      success: false,
-      error: error instanceof Error ? error.message : 'Failed to update ad set'
-    }, { status: 500 });
+    if (error instanceof AuthRequiredError) {
+      return NextResponse.json({ success: false, error: error.message }, { status: 401 });
+    }
+    if (error instanceof TenantAccessError) {
+      return NextResponse.json({ success: false, error: error.message }, { status: 403 });
+    }
+    return NextResponse.json(
+      { success: false, error: error instanceof Error ? error.message : 'Failed to update ad set' },
+      { status: 500 }
+    );
   }
 }

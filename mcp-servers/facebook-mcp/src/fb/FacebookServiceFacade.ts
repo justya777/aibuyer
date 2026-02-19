@@ -21,6 +21,7 @@ import type {
   UpdateAdSetParams,
   UpdateCampaignParams,
 } from '../types/facebook.js';
+import { AuditResult } from '@prisma/client';
 import { getEnvConfig, type EnvConfig } from '../config/env.js';
 import { AccountsApi } from './accounts.js';
 import { AdSetsApi } from './adsets.js';
@@ -33,6 +34,8 @@ import type { RequestContext } from './core/types.js';
 import { EnvTokenProvider } from './core/token-provider.js';
 import { InsightsApi } from './insights.js';
 import { TargetingApi } from './targeting.js';
+import { AuditLogService } from '../services/audit-log-service.js';
+import { PolicyViolationError, TenantIsolationError } from './core/types.js';
 
 type MutationWithWarnings<T> = T & { policyWarnings?: string[] };
 
@@ -41,6 +44,13 @@ interface FacadeDependencies {
   tenantRegistry?: TenantRegistry;
   graphClient?: GraphClient;
   policyEngine?: PolicyEngine;
+  auditLogService?: AuditLogService;
+}
+
+interface ActorContext {
+  tenantId: string;
+  userId?: string;
+  isPlatformAdmin?: boolean;
 }
 
 export class FacebookServiceFacade {
@@ -54,20 +64,23 @@ export class FacebookServiceFacade {
   private readonly adSetsApi: AdSetsApi;
   private readonly adsApi: AdsApi;
   private readonly insightsApi: InsightsApi;
+  private readonly auditLogService: AuditLogService;
 
   constructor(deps: FacadeDependencies = {}) {
     this.env = deps.env || getEnvConfig();
-    this.tenantRegistry = deps.tenantRegistry || new TenantRegistry(this.env.tenantAccessMap);
+    this.tenantRegistry = deps.tenantRegistry || new TenantRegistry();
 
-    const tokenProvider = new EnvTokenProvider(this.env.tenantTokenMap, this.tenantRegistry);
+    const tokenProvider = new EnvTokenProvider(this.env.metaSystemUserToken);
     this.graphClient =
       deps.graphClient ||
       new GraphClient(tokenProvider, {
         apiVersion: this.env.graphApiVersion,
         retry: this.env.graphRetry,
+        tenantRegistry: this.tenantRegistry,
       });
 
     this.policyEngine = deps.policyEngine || new PolicyEngine(this.env.policy);
+    this.auditLogService = deps.auditLogService || new AuditLogService();
     this.targetingApi = new TargetingApi(this.graphClient);
     this.accountsApi = new AccountsApi(this.graphClient);
     this.campaignsApi = new CampaignsApi(this.graphClient);
@@ -83,70 +96,69 @@ export class FacebookServiceFacade {
     return this.tenantRegistry;
   }
 
-  inferTenantIdByAdAccount(adAccountId: string): string | undefined {
-    return this.tenantRegistry.inferTenantIdByAdAccount(adAccountId);
+  async inferTenantIdByAdAccount(
+    adAccountId: string,
+    userId?: string,
+    isPlatformAdmin?: boolean
+  ): Promise<string | undefined> {
+    return this.tenantRegistry.inferTenantIdByAdAccount(adAccountId, userId, isPlatformAdmin);
   }
 
   async getAccounts(params: GetAccountsParams): Promise<FacebookAccount[]> {
-    const tenantIds = this.resolveTenantIdsForGlobalRead(params.tenantId, 'get_accounts');
-    const results = await Promise.all(
-      tenantIds.map(async (tenantId) => {
-        const ctx = this.buildContext(tenantId);
-        const allowedAdAccountIds = this.tenantRegistry.getAllowedAdAccountIds(tenantId);
-        return this.accountsApi.getAccounts(ctx, params, allowedAdAccountIds);
-      })
+    const actor = await this.requireActor(params, 'get_accounts');
+    const allowedAdAccountIds = await this.tenantRegistry.getAllowedAdAccountIds(
+      actor.tenantId,
+      actor.userId,
+      actor.isPlatformAdmin
     );
-
-    const byId = new Map<string, FacebookAccount>();
-    for (const group of results) {
-      for (const account of group) {
-        if (!byId.has(account.id)) {
-          byId.set(account.id, account);
-        }
-      }
-    }
-    return Array.from(byId.values());
+    return this.accountsApi.getAccounts(this.buildContext(actor), params, allowedAdAccountIds);
   }
 
-  async getPages(params: GetPagesParams = {}): Promise<FacebookPage[]> {
-    const tenantIds = this.resolveTenantIdsForGlobalRead(params.tenantId, 'get_pages');
-    const results = await Promise.all(
-      tenantIds.map(async (tenantId) => this.accountsApi.getPages(this.buildContext(tenantId), params))
-    );
-
-    const byId = new Map<string, FacebookPage>();
-    for (const group of results) {
-      for (const page of group) {
-        if (!byId.has(page.id)) {
-          byId.set(page.id, page);
-        }
-      }
-    }
-    return Array.from(byId.values());
+  async getPages(params: GetPagesParams): Promise<FacebookPage[]> {
+    const actor = await this.requireActor(params, 'get_pages');
+    return this.accountsApi.getPages(this.buildContext(actor), params);
   }
 
   async getPromotablePages(
     accountId: string,
-    tenantId?: string
+    tenantId?: string,
+    userId?: string,
+    isPlatformAdmin?: boolean
   ): Promise<Array<{ id: string; name: string; canPromote: boolean }>> {
-    const resolvedTenantId = this.resolveTenantByAccount(accountId, tenantId, 'get_promotable_pages');
-    this.tenantRegistry.assertAdAccountAllowed(resolvedTenantId, accountId);
-    const ctx = this.buildContext(resolvedTenantId, accountId);
+    const actor = await this.requireActor({ tenantId, userId, isPlatformAdmin }, 'get_promotable_pages');
+    await this.tenantRegistry.assertAdAccountAllowed(
+      actor.tenantId,
+      accountId,
+      actor.userId,
+      actor.isPlatformAdmin
+    );
+    const ctx = this.buildContext(actor, { adAccountId: accountId });
     return this.accountsApi.getPromotablePages(ctx, accountId);
   }
 
   async getCampaigns(params: GetCampaignsParams): Promise<FacebookCampaign[]> {
-    const tenantId = this.resolveTenantByAccount(params.accountId, params.tenantId, 'get_campaigns');
-    this.tenantRegistry.assertAdAccountAllowed(tenantId, params.accountId);
-    const ctx = this.buildContext(tenantId, params.accountId);
+    const actor = await this.requireActor(params, 'get_campaigns');
+    await this.tenantRegistry.assertAdAccountAllowed(
+      actor.tenantId,
+      params.accountId,
+      actor.userId,
+      actor.isPlatformAdmin
+    );
+    const ctx = this.buildContext(actor, { adAccountId: params.accountId });
     return this.campaignsApi.getCampaigns(ctx, params);
   }
 
   async createCampaign(params: CreateCampaignParams): Promise<MutationWithWarnings<FacebookCampaign>> {
-    this.tenantRegistry.assertAdAccountAllowed(params.tenantId, params.accountId);
-    const ctx = this.buildContext(params.tenantId, params.accountId);
+    const actor = await this.requireActor(params, 'create_campaign');
+    await this.tenantRegistry.assertAdAccountAllowed(
+      actor.tenantId,
+      params.accountId,
+      actor.userId,
+      actor.isPlatformAdmin
+    );
+    const ctx = this.buildContext(actor, { adAccountId: params.accountId });
     const evaluation = this.policyEngine.evaluateMutation({
-      tenantId: params.tenantId,
+      tenantId: actor.tenantId,
       operation: 'create_campaign',
       requireExplicitBudget: true,
       nextBudget: {
@@ -161,21 +173,47 @@ export class FacebookServiceFacade {
       },
     });
 
-    const created = await this.campaignsApi.createCampaign(ctx, params);
-    return this.attachWarnings(created, evaluation.warnings);
+    try {
+      const created = await this.campaignsApi.createCampaign(ctx, params);
+      await this.logMutation(
+        actor,
+        'create_campaign',
+        created.id,
+        `Created campaign ${created.name} in ${params.accountId}`,
+        AuditResult.SUCCESS,
+        { policyWarnings: evaluation.warnings }
+      );
+      return this.attachWarnings(created, evaluation.warnings);
+    } catch (error) {
+      await this.logMutation(
+        actor,
+        'create_campaign',
+        params.accountId,
+        `Failed to create campaign ${params.name} in ${params.accountId}`,
+        this.classifyAuditResult(error),
+        { error: error instanceof Error ? error.message : String(error) }
+      );
+      throw error;
+    }
   }
 
   async updateCampaign(params: UpdateCampaignParams): Promise<MutationWithWarnings<FacebookCampaign>> {
-    const ctx = this.buildContext(params.tenantId);
-    const accountId = await this.campaignsApi.getCampaignAccountId(ctx, params.campaignId);
-    this.tenantRegistry.assertAdAccountAllowed(params.tenantId, accountId);
+    const actor = await this.requireActor(params, 'update_campaign');
+    const baseCtx = this.buildContext(actor, { campaignId: params.campaignId });
+    const accountId = await this.campaignsApi.getCampaignAccountId(baseCtx, params.campaignId);
+    await this.tenantRegistry.assertAdAccountAllowed(
+      actor.tenantId,
+      accountId,
+      actor.userId,
+      actor.isPlatformAdmin
+    );
 
     const currentBudget = await this.campaignsApi.getCampaignBudget(
-      this.buildContext(params.tenantId, accountId),
+      this.buildContext(actor, { adAccountId: accountId, campaignId: params.campaignId }),
       params.campaignId
     );
     const evaluation = this.policyEngine.evaluateMutation({
-      tenantId: params.tenantId,
+      tenantId: actor.tenantId,
       operation: 'update_campaign',
       currentBudget,
       nextBudget: {
@@ -185,30 +223,65 @@ export class FacebookServiceFacade {
       nextStatus: params.status,
     });
 
-    const updated = await this.campaignsApi.updateCampaign(
-      this.buildContext(params.tenantId, accountId),
-      params
-    );
-    return this.attachWarnings(updated, evaluation.warnings);
+    try {
+      const updated = await this.campaignsApi.updateCampaign(
+        this.buildContext(actor, { adAccountId: accountId, campaignId: params.campaignId }),
+        params
+      );
+      await this.logMutation(
+        actor,
+        'update_campaign',
+        params.campaignId,
+        `Updated campaign ${params.campaignId}`,
+        AuditResult.SUCCESS,
+        { policyWarnings: evaluation.warnings }
+      );
+      return this.attachWarnings(updated, evaluation.warnings);
+    } catch (error) {
+      await this.logMutation(
+        actor,
+        'update_campaign',
+        params.campaignId,
+        `Failed to update campaign ${params.campaignId}`,
+        this.classifyAuditResult(error),
+        { error: error instanceof Error ? error.message : String(error) }
+      );
+      throw error;
+    }
   }
 
   async getInsights(params: GetInsightsParams): Promise<FacebookInsights> {
-    const ctx = await this.resolveInsightsContext(params);
+    const actor = await this.requireActor(params, 'get_insights');
+    const ctx = await this.resolveInsightsContext(actor, params);
     return this.insightsApi.getInsights(ctx, params);
   }
 
   async getAdSets(params: GetAdSetsParams): Promise<FacebookAdSet[]> {
-    const tenantId = this.requireTenantForTenantOnlyReads(params.tenantId, 'get_adsets');
-    const ctx = this.buildContext(tenantId);
+    const actor = await this.requireActor(params, 'get_adsets');
+    const ctx = this.buildContext(actor, { campaignId: params.campaignId });
     const accountId = await this.campaignsApi.getCampaignAccountId(ctx, params.campaignId);
-    this.tenantRegistry.assertAdAccountAllowed(tenantId, accountId);
-    return this.adSetsApi.getAdSets(this.buildContext(tenantId, accountId), params);
+    await this.tenantRegistry.assertAdAccountAllowed(
+      actor.tenantId,
+      accountId,
+      actor.userId,
+      actor.isPlatformAdmin
+    );
+    return this.adSetsApi.getAdSets(
+      this.buildContext(actor, { adAccountId: accountId, campaignId: params.campaignId }),
+      params
+    );
   }
 
   async createAdSet(params: CreateAdSetParams): Promise<MutationWithWarnings<FacebookAdSet>> {
-    this.tenantRegistry.assertAdAccountAllowed(params.tenantId, params.accountId);
+    const actor = await this.requireActor(params, 'create_adset');
+    await this.tenantRegistry.assertAdAccountAllowed(
+      actor.tenantId,
+      params.accountId,
+      actor.userId,
+      actor.isPlatformAdmin
+    );
     const evaluation = this.policyEngine.evaluateMutation({
-      tenantId: params.tenantId,
+      tenantId: actor.tenantId,
       operation: 'create_adset',
       requireExplicitBudget: true,
       nextBudget: {
@@ -224,24 +297,53 @@ export class FacebookServiceFacade {
       },
     });
 
-    const created = await this.adSetsApi.createAdSet(
-      this.buildContext(params.tenantId, params.accountId),
-      params
-    );
-    return this.attachWarnings(created, evaluation.warnings);
+    try {
+      const created = await this.adSetsApi.createAdSet(
+        this.buildContext(actor, {
+          adAccountId: params.accountId,
+          campaignId: params.campaignId,
+        }),
+        params
+      );
+      await this.logMutation(
+        actor,
+        'create_adset',
+        created.id,
+        `Created ad set ${created.name} in campaign ${params.campaignId}`,
+        AuditResult.SUCCESS,
+        { policyWarnings: evaluation.warnings }
+      );
+      return this.attachWarnings(created, evaluation.warnings);
+    } catch (error) {
+      await this.logMutation(
+        actor,
+        'create_adset',
+        params.campaignId,
+        `Failed to create ad set ${params.name}`,
+        this.classifyAuditResult(error),
+        { error: error instanceof Error ? error.message : String(error) }
+      );
+      throw error;
+    }
   }
 
   async updateAdSet(params: UpdateAdSetParams): Promise<MutationWithWarnings<FacebookAdSet>> {
-    const ctx = this.buildContext(params.tenantId);
+    const actor = await this.requireActor(params, 'update_adset');
+    const ctx = this.buildContext(actor, { adSetId: params.adSetId });
     const accountId = await this.adSetsApi.getAdSetAccountId(ctx, params.adSetId);
-    this.tenantRegistry.assertAdAccountAllowed(params.tenantId, accountId);
+    await this.tenantRegistry.assertAdAccountAllowed(
+      actor.tenantId,
+      accountId,
+      actor.userId,
+      actor.isPlatformAdmin
+    );
 
     const currentBudget = await this.adSetsApi.getAdSetBudget(
-      this.buildContext(params.tenantId, accountId),
+      this.buildContext(actor, { adAccountId: accountId, adSetId: params.adSetId }),
       params.adSetId
     );
     const evaluation = this.policyEngine.evaluateMutation({
-      tenantId: params.tenantId,
+      tenantId: actor.tenantId,
       operation: 'update_adset',
       currentBudget,
       nextBudget: {
@@ -251,191 +353,403 @@ export class FacebookServiceFacade {
       nextStatus: params.status,
     });
 
-    const updated = await this.adSetsApi.updateAdSet(
-      this.buildContext(params.tenantId, accountId),
-      params
-    );
-    return this.attachWarnings(updated, evaluation.warnings);
+    try {
+      const updated = await this.adSetsApi.updateAdSet(
+        this.buildContext(actor, { adAccountId: accountId, adSetId: params.adSetId }),
+        params
+      );
+      await this.logMutation(
+        actor,
+        'update_adset',
+        params.adSetId,
+        `Updated ad set ${params.adSetId}`,
+        AuditResult.SUCCESS,
+        { policyWarnings: evaluation.warnings }
+      );
+      return this.attachWarnings(updated, evaluation.warnings);
+    } catch (error) {
+      await this.logMutation(
+        actor,
+        'update_adset',
+        params.adSetId,
+        `Failed to update ad set ${params.adSetId}`,
+        this.classifyAuditResult(error),
+        { error: error instanceof Error ? error.message : String(error) }
+      );
+      throw error;
+    }
   }
 
   async getAds(params: GetAdsParams): Promise<FacebookAd[]> {
-    const tenantId = this.requireTenantForTenantOnlyReads(params.tenantId, 'get_ads');
-    const ctx = this.buildContext(tenantId);
+    const actor = await this.requireActor(params, 'get_ads');
+    const ctx = this.buildContext(actor);
 
     if (params.adSetId) {
-      const accountId = await this.adSetsApi.getAdSetAccountId(ctx, params.adSetId);
-      this.tenantRegistry.assertAdAccountAllowed(tenantId, accountId);
-      return this.adsApi.getAds(this.buildContext(tenantId, accountId), params);
+      const adSetCtx = this.buildContext(actor, { adSetId: params.adSetId });
+      const accountId = await this.adSetsApi.getAdSetAccountId(adSetCtx, params.adSetId);
+      await this.tenantRegistry.assertAdAccountAllowed(
+        actor.tenantId,
+        accountId,
+        actor.userId,
+        actor.isPlatformAdmin
+      );
+      return this.adsApi.getAds(
+        this.buildContext(actor, { adAccountId: accountId, adSetId: params.adSetId }),
+        params
+      );
     }
 
     if (params.campaignId) {
-      const accountId = await this.campaignsApi.getCampaignAccountId(ctx, params.campaignId);
-      this.tenantRegistry.assertAdAccountAllowed(tenantId, accountId);
-      return this.adsApi.getAds(this.buildContext(tenantId, accountId), params);
+      const campaignCtx = this.buildContext(actor, { campaignId: params.campaignId });
+      const accountId = await this.campaignsApi.getCampaignAccountId(campaignCtx, params.campaignId);
+      await this.tenantRegistry.assertAdAccountAllowed(
+        actor.tenantId,
+        accountId,
+        actor.userId,
+        actor.isPlatformAdmin
+      );
+      return this.adsApi.getAds(
+        this.buildContext(actor, { adAccountId: accountId, campaignId: params.campaignId }),
+        params
+      );
     }
 
     return [];
   }
 
   async createAd(params: CreateAdParams): Promise<MutationWithWarnings<FacebookAd>> {
-    this.tenantRegistry.assertAdAccountAllowed(params.tenantId, params.accountId);
+    const actor = await this.requireActor(params, 'create_ad');
+    await this.tenantRegistry.assertAdAccountAllowed(
+      actor.tenantId,
+      params.accountId,
+      actor.userId,
+      actor.isPlatformAdmin
+    );
     const evaluation = this.policyEngine.evaluateMutation({
-      tenantId: params.tenantId,
+      tenantId: actor.tenantId,
       operation: 'create_ad',
       nextStatus: params.status,
     });
 
-    const created = await this.adsApi.createAd(this.buildContext(params.tenantId, params.accountId), params);
-    return this.attachWarnings(created, evaluation.warnings);
+    try {
+      const created = await this.adsApi.createAd(
+        this.buildContext(actor, { adAccountId: params.accountId, adSetId: params.adSetId }),
+        params
+      );
+      await this.logMutation(
+        actor,
+        'create_ad',
+        created.id,
+        `Created ad ${created.name} in ad set ${params.adSetId}`,
+        AuditResult.SUCCESS,
+        { policyWarnings: evaluation.warnings }
+      );
+      return this.attachWarnings(created, evaluation.warnings);
+    } catch (error) {
+      await this.logMutation(
+        actor,
+        'create_ad',
+        params.adSetId,
+        `Failed to create ad ${params.name}`,
+        this.classifyAuditResult(error),
+        { error: error instanceof Error ? error.message : String(error) }
+      );
+      throw error;
+    }
   }
 
   async updateAd(params: UpdateAdParams): Promise<MutationWithWarnings<FacebookAd>> {
-    const ctx = this.buildContext(params.tenantId);
+    const actor = await this.requireActor(params, 'update_ad');
+    const ctx = this.buildContext(actor, { adId: params.adId });
     const accountId = await this.adsApi.getAdAccountId(ctx, params.adId);
-    this.tenantRegistry.assertAdAccountAllowed(params.tenantId, accountId);
+    await this.tenantRegistry.assertAdAccountAllowed(
+      actor.tenantId,
+      accountId,
+      actor.userId,
+      actor.isPlatformAdmin
+    );
 
     const evaluation = this.policyEngine.evaluateMutation({
-      tenantId: params.tenantId,
+      tenantId: actor.tenantId,
       operation: 'update_ad',
       nextStatus: params.status,
     });
 
-    const updated = await this.adsApi.updateAd(this.buildContext(params.tenantId, accountId), params);
-    return this.attachWarnings(updated, evaluation.warnings);
+    try {
+      const updated = await this.adsApi.updateAd(
+        this.buildContext(actor, { adAccountId: accountId, adId: params.adId }),
+        params
+      );
+      await this.logMutation(
+        actor,
+        'update_ad',
+        params.adId,
+        `Updated ad ${params.adId}`,
+        AuditResult.SUCCESS,
+        { policyWarnings: evaluation.warnings }
+      );
+      return this.attachWarnings(updated, evaluation.warnings);
+    } catch (error) {
+      await this.logMutation(
+        actor,
+        'update_ad',
+        params.adId,
+        `Failed to update ad ${params.adId}`,
+        this.classifyAuditResult(error),
+        { error: error instanceof Error ? error.message : String(error) }
+      );
+      throw error;
+    }
   }
 
   async duplicateCampaign(
     campaignId: string,
     options: DuplicateCampaignOptions
   ): Promise<MutationWithWarnings<{ copiedCampaignId: string }>> {
-    const ctx = this.buildContext(options.tenantId);
+    const actor = await this.requireActor(options, 'duplicate_campaign');
+    const ctx = this.buildContext(actor, { campaignId });
     const accountId = await this.campaignsApi.getCampaignAccountId(ctx, campaignId);
-    this.tenantRegistry.assertAdAccountAllowed(options.tenantId, accountId);
+    await this.tenantRegistry.assertAdAccountAllowed(
+      actor.tenantId,
+      accountId,
+      actor.userId,
+      actor.isPlatformAdmin
+    );
     const evaluation = this.policyEngine.evaluateMutation({
-      tenantId: options.tenantId,
+      tenantId: actor.tenantId,
       operation: 'duplicate_campaign',
       deepCopy: options.deepCopy,
     });
 
-    const result = await this.campaignsApi.duplicateCampaign(
-      this.buildContext(options.tenantId, accountId),
-      campaignId,
-      options
-    );
-    return this.attachWarnings(result, evaluation.warnings);
+    try {
+      const result = await this.campaignsApi.duplicateCampaign(
+        this.buildContext(actor, { adAccountId: accountId, campaignId }),
+        campaignId,
+        options
+      );
+      await this.logMutation(
+        actor,
+        'duplicate_campaign',
+        campaignId,
+        `Duplicated campaign ${campaignId}`,
+        AuditResult.SUCCESS,
+        { policyWarnings: evaluation.warnings, copiedCampaignId: result.copiedCampaignId }
+      );
+      return this.attachWarnings(result, evaluation.warnings);
+    } catch (error) {
+      await this.logMutation(
+        actor,
+        'duplicate_campaign',
+        campaignId,
+        `Failed to duplicate campaign ${campaignId}`,
+        this.classifyAuditResult(error),
+        { error: error instanceof Error ? error.message : String(error) }
+      );
+      throw error;
+    }
   }
 
   async duplicateAdSet(
     adSetId: string,
     options: DuplicateAdSetOptions
   ): Promise<MutationWithWarnings<{ copiedAdSetId: string }>> {
-    const ctx = this.buildContext(options.tenantId);
+    const actor = await this.requireActor(options, 'duplicate_adset');
+    const ctx = this.buildContext(actor, { adSetId });
     const accountId = await this.adSetsApi.getAdSetAccountId(ctx, adSetId);
-    this.tenantRegistry.assertAdAccountAllowed(options.tenantId, accountId);
+    await this.tenantRegistry.assertAdAccountAllowed(
+      actor.tenantId,
+      accountId,
+      actor.userId,
+      actor.isPlatformAdmin
+    );
     const evaluation = this.policyEngine.evaluateMutation({
-      tenantId: options.tenantId,
+      tenantId: actor.tenantId,
       operation: 'duplicate_adset',
       deepCopy: options.deepCopy,
     });
 
-    const result = await this.adSetsApi.duplicateAdSet(
-      this.buildContext(options.tenantId, accountId),
-      adSetId,
-      options
-    );
-    return this.attachWarnings(result, evaluation.warnings);
+    try {
+      const result = await this.adSetsApi.duplicateAdSet(
+        this.buildContext(actor, { adAccountId: accountId, adSetId }),
+        adSetId,
+        options
+      );
+      await this.logMutation(
+        actor,
+        'duplicate_adset',
+        adSetId,
+        `Duplicated ad set ${adSetId}`,
+        AuditResult.SUCCESS,
+        { policyWarnings: evaluation.warnings, copiedAdSetId: result.copiedAdSetId }
+      );
+      return this.attachWarnings(result, evaluation.warnings);
+    } catch (error) {
+      await this.logMutation(
+        actor,
+        'duplicate_adset',
+        adSetId,
+        `Failed to duplicate ad set ${adSetId}`,
+        this.classifyAuditResult(error),
+        { error: error instanceof Error ? error.message : String(error) }
+      );
+      throw error;
+    }
   }
 
   async duplicateAd(
     adId: string,
     options: DuplicateAdOptions
   ): Promise<MutationWithWarnings<{ copiedAdId: string }>> {
-    const ctx = this.buildContext(options.tenantId);
+    const actor = await this.requireActor(options, 'duplicate_ad');
+    const ctx = this.buildContext(actor, { adId });
     const accountId = await this.adsApi.getAdAccountId(ctx, adId);
-    this.tenantRegistry.assertAdAccountAllowed(options.tenantId, accountId);
+    await this.tenantRegistry.assertAdAccountAllowed(
+      actor.tenantId,
+      accountId,
+      actor.userId,
+      actor.isPlatformAdmin
+    );
     const evaluation = this.policyEngine.evaluateMutation({
-      tenantId: options.tenantId,
+      tenantId: actor.tenantId,
       operation: 'duplicate_ad',
     });
 
-    const result = await this.adsApi.duplicateAd(
-      this.buildContext(options.tenantId, accountId),
-      adId,
-      options
-    );
-    return this.attachWarnings(result, evaluation.warnings);
+    try {
+      const result = await this.adsApi.duplicateAd(
+        this.buildContext(actor, { adAccountId: accountId, adId }),
+        adId,
+        options
+      );
+      await this.logMutation(
+        actor,
+        'duplicate_ad',
+        adId,
+        `Duplicated ad ${adId}`,
+        AuditResult.SUCCESS,
+        { policyWarnings: evaluation.warnings, copiedAdId: result.copiedAdId }
+      );
+      return this.attachWarnings(result, evaluation.warnings);
+    } catch (error) {
+      await this.logMutation(
+        actor,
+        'duplicate_ad',
+        adId,
+        `Failed to duplicate ad ${adId}`,
+        this.classifyAuditResult(error),
+        { error: error instanceof Error ? error.message : String(error) }
+      );
+      throw error;
+    }
   }
 
-  private requireTenantForTenantOnlyReads(
-    tenantId: string | undefined,
+  private async requireActor(
+    params: { tenantId?: string; userId?: string; isPlatformAdmin?: boolean },
     toolName: string
-  ): string {
+  ): Promise<ActorContext> {
+    const tenantId = params.tenantId?.trim();
     if (!tenantId) {
-      throw new Error(`${toolName} requires tenantId because no accountId is available for inference.`);
+      throw new Error(`${toolName} requires tenantId. No default tenant fallback is allowed.`);
     }
-    return tenantId;
+    await this.tenantRegistry.assertTenantAccessible(
+      tenantId,
+      params.userId,
+      params.isPlatformAdmin
+    );
+    return {
+      tenantId,
+      userId: params.userId,
+      isPlatformAdmin: params.isPlatformAdmin,
+    };
   }
 
-  private resolveTenantIdsForGlobalRead(tenantId: string | undefined, toolName: string): string[] {
-    if (tenantId) {
-      return [tenantId];
-    }
-
-    const tenantIds = this.tenantRegistry.listTenantIds();
-    if (tenantIds.length === 0) {
-      throw new Error(
-        `${toolName} requires tenant configuration. Add tenants to TENANT_ACCESS_MAP.`
-      );
-    }
-
-    return tenantIds;
-  }
-
-  private resolveTenantByAccount(
-    accountId: string,
-    tenantId: string | undefined,
-    toolName: string
-  ): string {
-    if (tenantId) return tenantId;
-    const inferred = this.tenantRegistry.inferTenantIdByAdAccount(accountId);
-    if (!inferred) {
-      throw new Error(
-        `${toolName} requires tenantId when accountId cannot be mapped to a tenant via TENANT_ACCESS_MAP.`
-      );
-    }
-    return inferred;
-  }
-
-  private async resolveInsightsContext(params: GetInsightsParams): Promise<RequestContext> {
+  private async resolveInsightsContext(
+    actor: ActorContext,
+    params: GetInsightsParams
+  ): Promise<RequestContext> {
     if (params.accountId) {
-      const tenantId = this.resolveTenantByAccount(params.accountId, params.tenantId, 'get_insights');
-      this.tenantRegistry.assertAdAccountAllowed(tenantId, params.accountId);
-      return this.buildContext(tenantId, params.accountId);
+      await this.tenantRegistry.assertAdAccountAllowed(
+        actor.tenantId,
+        params.accountId,
+        actor.userId,
+        actor.isPlatformAdmin
+      );
+      return this.buildContext(actor, { adAccountId: params.accountId });
     }
 
-    const tenantId = this.requireTenantForTenantOnlyReads(params.tenantId, 'get_insights');
-    const baseCtx = this.buildContext(tenantId);
+    const baseCtx = this.buildContext(actor);
 
     if (params.campaignId) {
-      const accountId = await this.campaignsApi.getCampaignAccountId(baseCtx, params.campaignId);
-      this.tenantRegistry.assertAdAccountAllowed(tenantId, accountId);
-      return this.buildContext(tenantId, accountId);
+      const campaignCtx = this.buildContext(actor, { campaignId: params.campaignId });
+      const accountId = await this.campaignsApi.getCampaignAccountId(campaignCtx, params.campaignId);
+      await this.tenantRegistry.assertAdAccountAllowed(
+        actor.tenantId,
+        accountId,
+        actor.userId,
+        actor.isPlatformAdmin
+      );
+      return this.buildContext(actor, { adAccountId: accountId, campaignId: params.campaignId });
     }
     if (params.adSetId) {
-      const accountId = await this.adSetsApi.getAdSetAccountId(baseCtx, params.adSetId);
-      this.tenantRegistry.assertAdAccountAllowed(tenantId, accountId);
-      return this.buildContext(tenantId, accountId);
+      const adSetCtx = this.buildContext(actor, { adSetId: params.adSetId });
+      const accountId = await this.adSetsApi.getAdSetAccountId(adSetCtx, params.adSetId);
+      await this.tenantRegistry.assertAdAccountAllowed(
+        actor.tenantId,
+        accountId,
+        actor.userId,
+        actor.isPlatformAdmin
+      );
+      return this.buildContext(actor, { adAccountId: accountId, adSetId: params.adSetId });
     }
     if (params.adId) {
-      const accountId = await this.adsApi.getAdAccountId(baseCtx, params.adId);
-      this.tenantRegistry.assertAdAccountAllowed(tenantId, accountId);
-      return this.buildContext(tenantId, accountId);
+      const adCtx = this.buildContext(actor, { adId: params.adId });
+      const accountId = await this.adsApi.getAdAccountId(adCtx, params.adId);
+      await this.tenantRegistry.assertAdAccountAllowed(
+        actor.tenantId,
+        accountId,
+        actor.userId,
+        actor.isPlatformAdmin
+      );
+      return this.buildContext(actor, { adAccountId: accountId, adId: params.adId });
     }
     return baseCtx;
   }
 
-  private buildContext(tenantId: string, adAccountId?: string): RequestContext {
-    return { tenantId, adAccountId };
+  private buildContext(
+    actor: ActorContext,
+    extras: Partial<RequestContext> = {}
+  ): RequestContext {
+    return {
+      tenantId: actor.tenantId,
+      userId: actor.userId,
+      isPlatformAdmin: actor.isPlatformAdmin,
+      ...extras,
+    };
+  }
+
+  private async logMutation(
+    actor: ActorContext,
+    action: string,
+    assetId: string | undefined,
+    summary: string,
+    result: AuditResult,
+    metadata?: Record<string, unknown>
+  ): Promise<void> {
+    await this.auditLogService.log({
+      tenantId: actor.tenantId,
+      userId: actor.userId,
+      action,
+      assetId,
+      summary,
+      result,
+      metadata,
+    });
+  }
+
+  private classifyAuditResult(error: unknown): AuditResult {
+    if (error instanceof PolicyViolationError || error instanceof TenantIsolationError) {
+      return AuditResult.BLOCKED;
+    }
+    return AuditResult.ERROR;
   }
 
   private attachWarnings<T>(result: T, warnings: string[]): MutationWithWarnings<T> {

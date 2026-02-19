@@ -40,30 +40,40 @@ export class PolicyEngine {
     this.enforceBudgetIncreaseCap(input);
 
     const warnings: string[] = [];
+    const reasons: string[] = [];
 
     if (this.isEnableOperation(input.nextStatus)) {
-      warnings.push('Enabling campaigns/ad sets/ads should require explicit approval.');
+      const reason = 'Enabling campaigns/ad sets/ads should require explicit approval.';
+      warnings.push(reason);
+      reasons.push('ENABLE_OPERATION');
     }
 
     if (this.isBudgetIncrease(input.currentBudget, input.nextBudget)) {
-      warnings.push('Budget increase detected and should require explicit approval.');
+      const reason = 'Budget increase detected and should require explicit approval.';
+      warnings.push(reason);
+      reasons.push('BUDGET_INCREASE');
     }
 
     if (this.isBroadTargeting(input.targeting)) {
-      warnings.push('Broad targeting detected and should require explicit approval.');
+      const reason = 'Broad targeting detected and should require explicit approval.';
+      warnings.push(reason);
+      reasons.push('BROAD_TARGETING');
     }
 
     if (input.operation.startsWith('duplicate_') && input.deepCopy) {
-      warnings.push('Bulk duplication (deep copy) should require explicit approval.');
+      const reason = 'Bulk duplication (deep copy) should require explicit approval.';
+      warnings.push(reason);
+      reasons.push('BULK_DUPLICATION');
     }
 
-    if (this.policy.enforcementMode === 'block' && warnings.length > 0) {
+    const requiresApproval = warnings.length > 0;
+    if (this.policy.enforcementMode === 'block' && requiresApproval) {
       throw new PolicyViolationError(
         `Policy blocked operation ${input.operation}: ${warnings.join(' ')}`
       );
     }
 
-    return { warnings };
+    return { warnings, requiresApproval, reasons };
   }
 
   private enforceMutationVolume(tenantId: string): void {

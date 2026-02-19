@@ -2,6 +2,9 @@
 
 import express from 'express';
 import cors from 'cors';
+import dotenv from 'dotenv';
+import path from 'path';
+import { existsSync } from 'fs';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
@@ -11,20 +14,19 @@ import {
 import { loadEnvConfig } from './config/env.js';
 import { FacebookToolHandlers } from './mcp/handlers.js';
 import { logger } from './utils/logger.js';
+import { TenantIsolationError } from './fb/core/types.js';
+
+const rootEnvPath = path.resolve(process.cwd(), '../../.env');
+if (existsSync(rootEnvPath)) {
+  dotenv.config({ path: rootEnvPath });
+}
+dotenv.config();
 
 const env = loadEnvConfig();
 
-logger.info('Loaded tenant configuration', {
-  tenantIds: Object.keys(env.tenantAccessMap),
-  tenantAccessMap: Object.fromEntries(
-    Object.entries(env.tenantAccessMap).map(([tenantId, cfg]) => [
-      tenantId,
-      {
-        allowedAdAccountIds: cfg.allowedAdAccountIds,
-        systemUserTokenRef: cfg.systemUserTokenRef,
-      },
-    ])
-  ),
+logger.info('Environment loaded', {
+  graphApiVersion: env.graphApiVersion,
+  graphMaxRetries: env.graphRetry.maxRetries,
 });
 
 class FacebookMCPServer {
@@ -85,17 +87,19 @@ class FacebookMCPServer {
           error: { code: -32600, message: 'Invalid Request' },
         });
       } catch (error) {
+        const isTenantIsolation = error instanceof TenantIsolationError;
         logger.error('HTTP MCP error', {
           method,
           message: error instanceof Error ? error.message : String(error),
+          status: isTenantIsolation ? 403 : 500,
         });
 
-        res.status(500).json({
+        res.status(isTenantIsolation ? 403 : 500).json({
           id: requestId || null,
           jsonrpc: '2.0',
           error: {
-            code: -32603,
-            message: 'Internal error',
+            code: isTenantIsolation ? 403 : -32603,
+            message: isTenantIsolation ? 'Forbidden' : 'Internal error',
             data: error instanceof Error ? error.message : 'Unknown error',
           },
         });

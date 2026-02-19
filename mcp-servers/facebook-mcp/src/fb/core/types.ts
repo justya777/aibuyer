@@ -1,6 +1,11 @@
 export interface RequestContext {
   tenantId: string;
+  userId?: string;
+  isPlatformAdmin?: boolean;
   adAccountId?: string;
+  campaignId?: string;
+  adSetId?: string;
+  adId?: string;
 }
 
 export type GraphHttpMethod = 'GET' | 'POST' | 'DELETE';
@@ -41,4 +46,6 @@ export class PolicyViolationError extends Error {
 
 export interface PolicyEvaluation {
   warnings: string[];
+  requiresApproval: boolean;
+  reasons: string[];
 }

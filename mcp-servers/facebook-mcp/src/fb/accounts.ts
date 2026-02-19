@@ -92,7 +92,7 @@ export class AccountsApi {
       path: 'me/accounts',
       query: {
         limit: params.limit || 50,
-        fields: 'id,name,category,tasks,access_token',
+        fields: 'id,name,category,tasks',
       },
     });
 

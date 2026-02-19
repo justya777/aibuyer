@@ -1,19 +1,29 @@
 export class MCPClient {
   private requestId = 1;
-  private readonly defaultTenantId: string | undefined;
+  private readonly context: {
+    tenantId: string;
+    userId?: string;
+    isPlatformAdmin?: boolean;
+  };
 
-  constructor() {
-    this.defaultTenantId = process.env.FACEBOOK_TENANT_ID || process.env.TENANT_ID;
-    console.log('MCP Client initialized - using direct API calls');
+  constructor(context: { tenantId: string; userId?: string; isPlatformAdmin?: boolean }) {
+    this.context = context;
   }
 
   async callTool(toolName: string, params: any): Promise<any> {
     const resolvedParams =
-      this.defaultTenantId && params && typeof params === 'object' && !params.tenantId
-        ? { ...params, tenantId: this.defaultTenantId }
-        : params;
-
-    console.log(`MCP Client: Direct call to ${toolName} with params:`, resolvedParams);
+      params && typeof params === 'object'
+        ? {
+            ...params,
+            tenantId: this.context.tenantId,
+            userId: this.context.userId,
+            isPlatformAdmin: this.context.isPlatformAdmin,
+          }
+        : {
+            tenantId: this.context.tenantId,
+            userId: this.context.userId,
+            isPlatformAdmin: this.context.isPlatformAdmin,
+          };
     
     try {
       // Make direct HTTP call to our internal MCP server
@@ -31,15 +41,16 @@ export class MCPClient {
         })
       });
 
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
+      const result = await response.json().catch(() => null);
 
-      const result = await response.json();
-      console.log(`MCP Client: Received result from ${toolName}:`, result);
+      if (!response.ok) {
+        const errorMessage =
+          result?.error?.data || result?.error?.message || `HTTP error! status: ${response.status}`;
+        throw new Error(errorMessage);
+      }
       
       if (result.error) {
-        throw new Error(result.error.message || 'MCP Error');
+        throw new Error(result.error.data || result.error.message || 'MCP Error');
       }
 
       // Parse the result content if it's a text response
@@ -48,10 +59,8 @@ export class MCPClient {
         if (textContent) {
           try {
             const parsed = JSON.parse(textContent.text);
-            console.log(`MCP Client: Parsed result for ${toolName}:`, parsed);
             return parsed;
           } catch {
-            console.log(`MCP Client: Failed to parse JSON, returning raw text for ${toolName}:`, textContent.text);
             return textContent.text;
           }
         }
@@ -59,7 +68,6 @@ export class MCPClient {
       
       return result.result;
     } catch (error) {
-      console.error(`MCP Client: Failed to call tool ${toolName}:`, error);
       throw error;
     }
   }
@@ -79,14 +87,12 @@ export class MCPClient {
 
       return await response.json();
     } catch (error) {
-      console.error('Failed to list tools:', error);
       return { tools: [] };
     }
   }
 
 
   destroy() {
-    // Cleanup if needed
-    console.log('MCP Client destroyed');
+    // No-op cleanup hook for compatibility.
   }
 }

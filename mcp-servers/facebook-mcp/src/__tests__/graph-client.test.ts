@@ -34,6 +34,7 @@ describe('GraphClient', () => {
     expect(result.data).toEqual({ ok: true });
     expect(httpClient.request).toHaveBeenCalledTimes(2);
     expect(sleepFn).toHaveBeenCalledTimes(1);
+    expect(sleepFn).toHaveBeenCalledWith(10);
   });
 
   it('throws after retry budget exhausted', async () => {
@@ -56,6 +57,7 @@ describe('GraphClient', () => {
       client.request({ tenantId: 'tenantA' }, { method: 'GET', path: 'me' })
     ).rejects.toBeInstanceOf(GraphApiError);
     expect(httpClient.request).toHaveBeenCalledTimes(2);
+    expect(sleepFn).toHaveBeenCalledWith(10);
   });
 
   it('parses rate limit headers', () => {

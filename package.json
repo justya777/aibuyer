@@ -15,11 +15,24 @@
     "build:frontend": "cd frontend && npm run build",
     "build:mcp": "cd mcp-servers/facebook-mcp && npm run build",
     "start": "npm run start:frontend",
-    "start:frontend": "cd frontend && npm run start"
+    "start:frontend": "cd frontend && npm run start",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:migrate:deploy": "prisma migrate deploy",
+    "prisma:seed": "prisma db seed"
   },
   "devDependencies": {
     "concurrently": "^8.2.2",
+    "prisma": "^6.5.0",
+    "tsx": "^4.20.5",
     "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.5.0",
+    "bcryptjs": "^3.0.2"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
   },
   "engines": {
     "node": ">=18.0.0"

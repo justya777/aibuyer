@@ -3,9 +3,11 @@ import { writeFile, mkdir } from 'fs/promises';
 import { existsSync } from 'fs';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
+import { AuthRequiredError, TenantAccessError, resolveTenantContext } from '@/lib/tenant-context';
 
 export async function POST(request: NextRequest) {
   try {
+    const context = await resolveTenantContext(request);
     const formData = await request.formData();
     const file = formData.get('file') as File;
     const materialType = formData.get('type') as string || 'image';
@@ -42,13 +44,13 @@ export async function POST(request: NextRequest) {
     // Generate filename with accountName prefix (no UUID)
     const fileExtension = path.extname(file.name);
     const baseFilename = path.basename(file.name, fileExtension);
-    let uniqueFilename = `${adName}_${baseFilename}${fileExtension}`;
+    let uniqueFilename = `${context.tenantId}_${adName}_${baseFilename}${fileExtension}`;
     let filePath = path.join(uploadsDir, uniqueFilename);
     
     // Handle file name conflicts by adding counter
     let counter = 1;
     while (existsSync(filePath)) {
-      uniqueFilename = `${adName}_${baseFilename}_${counter}${fileExtension}`;
+      uniqueFilename = `${context.tenantId}_${adName}_${baseFilename}_${counter}${fileExtension}`;
       filePath = path.join(uploadsDir, uniqueFilename);
       counter++;
     }
@@ -79,7 +81,8 @@ export async function POST(request: NextRequest) {
       size: file.size,
       category: isImage ? 'image' : isVideo ? 'video' : 'other',
       uploadedAt: new Date().toISOString(),
-      adName: adName
+      adName: adName,
+      tenantId: context.tenantId,
     };
 
     console.log(`✅ Uploaded material: ${file.name} → ${uniqueFilename}`);
@@ -93,7 +96,12 @@ export async function POST(request: NextRequest) {
     });
 
   } catch (error) {
-    console.error('❌ Upload error:', error);
+    if (error instanceof AuthRequiredError) {
+      return NextResponse.json({ success: false, error: error.message }, { status: 401 });
+    }
+    if (error instanceof TenantAccessError) {
+      return NextResponse.json({ success: false, error: error.message }, { status: 403 });
+    }
     return NextResponse.json(
       { 
         success: false, 
@@ -106,6 +114,7 @@ export async function POST(request: NextRequest) {
 
 export async function GET(request: NextRequest) {
   try {
+    await resolveTenantContext(request);
     // Return list of uploaded materials
     const { searchParams } = new URL(request.url);
     const adName = searchParams.get('adName');

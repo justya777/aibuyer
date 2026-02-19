@@ -2,9 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import { readdir, stat } from 'fs/promises';
 import { existsSync } from 'fs';
 import path from 'path';
+import { AuthRequiredError, TenantAccessError, resolveTenantContext } from '@/lib/tenant-context';
 
 export async function GET(request: NextRequest) {
   try {
+    const context = await resolveTenantContext(request);
     const { searchParams } = new URL(request.url);
     const adName = searchParams.get('adName');
 
@@ -26,6 +28,10 @@ export async function GET(request: NextRequest) {
       const stats = await stat(filePath);
       
       if (stats.isFile()) {
+        if (!filename.startsWith(`${context.tenantId}_`)) {
+          continue;
+        }
+
         const fileExtension = path.extname(filename).toLowerCase();
         const isImage = ['.jpg', '.jpeg', '.png', '.gif'].includes(fileExtension);
         const isVideo = ['.mp4', '.mov', '.avi'].includes(fileExtension);
@@ -38,11 +44,11 @@ export async function GET(request: NextRequest) {
         // Extract original name from accountName_originalName format
         let originalName = filename;
         if (filename.includes('_')) {
-          // Format: "AccountName_originalName.ext" or "AccountName_originalName_counter.ext"
+          // Format: "tenantId_accountName_originalName.ext" or "..._counter.ext"
           const parts = filename.split('_');
-          if (parts.length >= 2) {
-            // Remove the first part (account name), keep the rest
-            const nameParts = parts.slice(1);
+          if (parts.length >= 3) {
+            // Remove tenantId + account name prefixes.
+            const nameParts = parts.slice(2);
             // If last part is a number (counter), remove it
             if (nameParts.length > 1 && !isNaN(parseInt(nameParts[nameParts.length - 1]))) {
               nameParts.pop();
@@ -82,7 +88,12 @@ export async function GET(request: NextRequest) {
     });
 
   } catch (error) {
-    console.error('❌ Get materials error:', error);
+    if (error instanceof AuthRequiredError) {
+      return NextResponse.json({ success: false, error: error.message }, { status: 401 });
+    }
+    if (error instanceof TenantAccessError) {
+      return NextResponse.json({ success: false, error: error.message }, { status: 403 });
+    }
     return NextResponse.json(
       { success: false, error: 'Failed to get materials' },
       { status: 500 }

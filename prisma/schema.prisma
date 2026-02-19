@@ -1,0 +1,95 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  ADMIN
+  USER
+}
+
+enum TenantMemberRole {
+  ADMIN
+  MEMBER
+}
+
+enum AuditResult {
+  SUCCESS
+  ERROR
+  BLOCKED
+}
+
+model User {
+  id                     String         @id @default(cuid())
+  email                  String         @unique
+  passwordHash           String?
+  oauthProvider          String?
+  oauthProviderAccountId String?
+  role                   UserRole       @default(USER)
+  activeTenantId         String?
+  createdAt              DateTime       @default(now())
+  updatedAt              DateTime       @updatedAt
+  activeTenant           Tenant?        @relation("ActiveTenant", fields: [activeTenantId], references: [id], onDelete: SetNull)
+  tenantMemberships      TenantMember[]
+  auditLogs              AuditLog[]
+
+  @@unique([oauthProvider, oauthProviderAccountId])
+  @@index([activeTenantId])
+}
+
+model Tenant {
+  id          String         @id @default(cuid())
+  name        String
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+  members     TenantMember[]
+  assets      TenantAsset[]
+  auditLogs   AuditLog[]
+  activeUsers User[]         @relation("ActiveTenant")
+}
+
+model TenantMember {
+  id        String           @id @default(cuid())
+  userId    String
+  tenantId  String
+  role      TenantMemberRole @default(MEMBER)
+  createdAt DateTime         @default(now())
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tenant    Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, tenantId])
+  @@index([tenantId])
+}
+
+model TenantAsset {
+  id          String   @id @default(cuid())
+  tenantId    String
+  adAccountId String
+  createdAt   DateTime @default(now())
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, adAccountId])
+  @@index([adAccountId])
+}
+
+model AuditLog {
+  id        String      @id @default(cuid())
+  tenantId  String
+  userId    String?
+  action    String
+  assetId   String?
+  summary   String
+  result    AuditResult
+  timestamp DateTime    @default(now())
+  metadata  Json?
+  tenant    Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user      User?       @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, timestamp])
+  @@index([userId, timestamp])
+  @@index([action, timestamp])
+}

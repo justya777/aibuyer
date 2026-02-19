@@ -1,65 +1,137 @@
-import type { TenantAccessConfig } from '../../config/env.js';
 import { TenantIsolationError } from './types.js';
+import { prisma } from '../../db/prisma.js';
 
 function normalizeAdAccountId(adAccountId: string): string {
   return adAccountId.startsWith('act_') ? adAccountId : `act_${adAccountId}`;
 }
 
 export class TenantRegistry {
-  private readonly tenantAccessMap: Record<string, TenantAccessConfig>;
+  async assertTenantAccessible(
+    tenantId: string,
+    userId?: string,
+    isPlatformAdmin = false
+  ): Promise<void> {
+    if (isPlatformAdmin) {
+      const exists = await prisma.tenant.findUnique({
+        where: { id: tenantId },
+        select: { id: true },
+      });
+      if (!exists) {
+        throw new TenantIsolationError(`Tenant ${tenantId} was not found.`);
+      }
+      return;
+    }
 
-  constructor(tenantAccessMap: Record<string, TenantAccessConfig>) {
-    this.tenantAccessMap = tenantAccessMap;
+    if (!userId) {
+      throw new TenantIsolationError('userId is required for tenant access checks.');
+    }
+
+    const membership = await prisma.tenantMember.findUnique({
+      where: {
+        userId_tenantId: {
+          userId,
+          tenantId,
+        },
+      },
+      select: { id: true },
+    });
+
+    if (!membership) {
+      throw new TenantIsolationError(`User ${userId} is not a member of tenant ${tenantId}.`);
+    }
   }
 
-  getTenantConfig(tenantId: string): TenantAccessConfig | undefined {
-    return this.tenantAccessMap[tenantId];
+  async hasTenant(tenantId: string): Promise<boolean> {
+    const tenant = await prisma.tenant.findUnique({
+      where: { id: tenantId },
+      select: { id: true },
+    });
+    return Boolean(tenant);
   }
 
-  getAllowedAdAccountIds(tenantId: string): string[] {
-    const cfg = this.getTenantConfig(tenantId);
-    return cfg?.allowedAdAccountIds || [];
+  async listTenantIds(userId?: string, isPlatformAdmin = false): Promise<string[]> {
+    if (isPlatformAdmin) {
+      const tenants = await prisma.tenant.findMany({ select: { id: true } });
+      return tenants.map((tenant) => tenant.id);
+    }
+
+    if (!userId) return [];
+    const memberships = await prisma.tenantMember.findMany({
+      where: { userId },
+      select: { tenantId: true },
+    });
+    return memberships.map((membership) => membership.tenantId);
   }
 
-  getSystemUserTokenRef(tenantId: string): string | undefined {
-    return this.getTenantConfig(tenantId)?.systemUserTokenRef;
+  async getAllowedAdAccountIds(
+    tenantId: string,
+    userId?: string,
+    isPlatformAdmin = false
+  ): Promise<string[]> {
+    await this.assertTenantAccessible(tenantId, userId, isPlatformAdmin);
+    const assets = await prisma.tenantAsset.findMany({
+      where: { tenantId },
+      select: { adAccountId: true },
+    });
+    return assets.map((asset) => normalizeAdAccountId(asset.adAccountId));
   }
 
-  hasTenant(tenantId: string): boolean {
-    return Boolean(this.getTenantConfig(tenantId));
-  }
-
-  listTenantIds(): string[] {
-    return Object.keys(this.tenantAccessMap);
-  }
-
-  isAdAccountAllowed(tenantId: string, adAccountId: string): boolean {
-    const cfg = this.getTenantConfig(tenantId);
-    if (!cfg) return false;
-
+  async isAdAccountAllowed(
+    tenantId: string,
+    adAccountId: string,
+    userId?: string,
+    isPlatformAdmin = false
+  ): Promise<boolean> {
+    await this.assertTenantAccessible(tenantId, userId, isPlatformAdmin);
     const normalized = normalizeAdAccountId(adAccountId);
-    return cfg.allowedAdAccountIds.includes(normalized);
+    const asset = await prisma.tenantAsset.findUnique({
+      where: {
+        tenantId_adAccountId: {
+          tenantId,
+          adAccountId: normalized,
+        },
+      },
+      select: { id: true },
+    });
+    return Boolean(asset);
   }
 
-  assertAdAccountAllowed(tenantId: string, adAccountId: string): void {
-    if (!this.isAdAccountAllowed(tenantId, adAccountId)) {
+  async assertAdAccountAllowed(
+    tenantId: string,
+    adAccountId: string,
+    userId?: string,
+    isPlatformAdmin = false
+  ): Promise<void> {
+    const allowed = await this.isAdAccountAllowed(tenantId, adAccountId, userId, isPlatformAdmin);
+    if (!allowed) {
       throw new TenantIsolationError(
         `Tenant ${tenantId} is not allowed to access ad account ${normalizeAdAccountId(adAccountId)}`
       );
     }
   }
 
-  inferTenantIdByAdAccount(adAccountId: string): string | undefined {
+  async inferTenantIdByAdAccount(
+    adAccountId: string,
+    userId?: string,
+    isPlatformAdmin = false
+  ): Promise<string | undefined> {
     const normalized = normalizeAdAccountId(adAccountId);
-    const matches = Object.entries(this.tenantAccessMap)
-      .filter(([, cfg]) => cfg.allowedAdAccountIds.includes(normalized))
-      .map(([tenantId]) => tenantId);
+    const matches = await prisma.tenantAsset.findMany({
+      where: isPlatformAdmin
+        ? { adAccountId: normalized }
+        : {
+            adAccountId: normalized,
+            tenant: userId ? { members: { some: { userId } } } : undefined,
+          },
+      select: { tenantId: true },
+    });
+    const tenantIds = matches.map((match) => match.tenantId);
 
-    if (matches.length === 1) {
-      return matches[0];
+    if (tenantIds.length === 1) {
+      return tenantIds[0];
     }
 
-    if (matches.length > 1) {
+    if (tenantIds.length > 1) {
       throw new TenantIsolationError(
         `Ad account ${normalized} is mapped to multiple tenants. Explicit tenantId is required.`
       );

@@ -6,6 +6,7 @@ const logLevel = process.env.LOG_LEVEL || 'info';
 const SENSITIVE_KEY_REGEX = /(authorization|access[_-]?token|token|secret)/i;
 const SENSITIVE_STRING_REGEXES = [
   /(access_token=)([^&\s]+)/gi,
+  /([?&](?:token|secret)=)([^&\s]+)/gi,
   /(authorization["']?\s*[:=]\s*["']?bearer\s+)([a-z0-9\-_\.]+)/gi,
   /("?(?:access[_-]?token|authorization|token|secret)"?\s*:\s*")([^"]+)(")/gi,
 ];

@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import Sidebar from '@/components/Sidebar'
 import AccountsGrid from '@/components/AccountsGrid'
 import AICommandCenter from '@/components/AICommandCenter'
@@ -25,26 +25,31 @@ export default function Dashboard() {
   const [showMaterialUpload, setShowMaterialUpload] = useState(false)
   const [uploadedMaterials, setUploadedMaterials] = useState<any[]>([])
 
+  const fetchAccounts = useCallback(async () => {
+    try {
+      const response = await fetch('/api/facebook/accounts')
+      if (response.ok) {
+        const data = await response.json()
+        if (data.success && data.accounts) {
+          setAccounts(data.accounts)
+        } else {
+          setAccounts([])
+        }
+      } else {
+        setAccounts([])
+      }
+    } catch (error) {
+      console.error('Failed to fetch Facebook accounts:', error)
+      setAccounts([])
+    } finally {
+      setIsLoadingAccounts(false)
+    }
+  }, [])
+
   // Fetch real Facebook accounts on component mount
   useEffect(() => {
-    const fetchAccounts = async () => {
-      try {
-        const response = await fetch('/api/facebook/accounts')
-        if (response.ok) {
-          const data = await response.json()
-          if (data.success && data.accounts) {
-            setAccounts(data.accounts)
-          }
-        }
-      } catch (error) {
-        console.error('Failed to fetch Facebook accounts:', error)
-      } finally {
-        setIsLoadingAccounts(false)
-      }
-    }
-
     fetchAccounts()
-  }, [])
+  }, [fetchAccounts])
 
   return (
     <div className="flex h-full bg-gray-50">
@@ -157,6 +162,7 @@ export default function Dashboard() {
                 selectedAccount={selectedAccount}
                 onSelectAccount={setSelectedAccount}
                 campaignRefreshKey={campaignRefreshKey}
+                onAccountsChanged={fetchAccounts}
               />
             )}
           </div>

@@ -40,6 +40,7 @@ describe('PolicyEngine', () => {
     });
 
     expect(result.warnings.length).toBeGreaterThan(0);
+    expect(result.requiresApproval).toBe(true);
     expect(result.warnings.join(' ')).toMatch(/approval/i);
   });
 

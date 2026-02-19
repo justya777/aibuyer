@@ -150,13 +150,16 @@ export interface FacebookInsights {
   totalCampaigns?: number;
 }
 
-interface TenantScoped {
-  tenantId?: string;
+interface ActorScoped {
+  userId?: string;
+  isPlatformAdmin?: boolean;
 }
 
-interface TenantRequired {
+interface TenantRequired extends ActorScoped {
   tenantId: string;
 }
+
+interface TenantScoped extends TenantRequired {}
 
 export interface GetAccountsParams extends TenantScoped {
   limit?: number;

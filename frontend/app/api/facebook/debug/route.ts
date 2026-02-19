@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { MCPClient } from '../../../../lib/mcp-client';
+import { AuthRequiredError, TenantAccessError, resolveTenantContext } from '@/lib/tenant-context';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -11,7 +12,8 @@ export async function GET(request: NextRequest) {
     const campaignId = searchParams.get('campaignId');
     const level = searchParams.get('level') || 'account';
 
-    const mcpClient = new MCPClient();
+    const context = await resolveTenantContext(request);
+    const mcpClient = new MCPClient(context);
     const debugData: any = {
       timestamp: new Date().toISOString(),
       requests: []
@@ -162,13 +164,19 @@ export async function GET(request: NextRequest) {
     });
 
   } catch (error) {
-    console.error('🚨 [DEBUG] Facebook debug API error:', error);
-    
-    return NextResponse.json({
-      success: false,
-      error: error instanceof Error ? error.message : 'Unknown error',
-      stack: error instanceof Error ? error.stack : undefined,
-      timestamp: new Date().toISOString()
-    }, { status: 500 });
+    if (error instanceof AuthRequiredError) {
+      return NextResponse.json({ success: false, error: error.message }, { status: 401 });
+    }
+    if (error instanceof TenantAccessError) {
+      return NextResponse.json({ success: false, error: error.message }, { status: 403 });
+    }
+    return NextResponse.json(
+      {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error',
+        timestamp: new Date().toISOString(),
+      },
+      { status: 500 }
+    );
   }
 }

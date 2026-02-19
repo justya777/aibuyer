@@ -1,28 +1,35 @@
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 
-const tenantIdOptional = z.string().optional();
 const tenantIdRequired = z.string();
+const actorFields = {
+  userId: z.string().optional(),
+  isPlatformAdmin: z.boolean().optional(),
+};
 
 export const GetAccountsSchema = z.object({
-  tenantId: tenantIdOptional,
+  tenantId: tenantIdRequired,
+  ...actorFields,
   limit: z.number().optional().default(50),
   fields: z.array(z.string()).optional(),
 });
 
 export const GetPagesSchema = z.object({
-  tenantId: tenantIdOptional,
+  tenantId: tenantIdRequired,
+  ...actorFields,
   limit: z.number().optional().default(50),
   fields: z.array(z.string()).optional(),
 });
 
 export const GetPromotablePagesSchema = z.object({
-  tenantId: tenantIdOptional,
+  tenantId: tenantIdRequired,
+  ...actorFields,
   accountId: z.string(),
 });
 
 export const GetCampaignsSchema = z.object({
-  tenantId: tenantIdOptional,
+  tenantId: tenantIdRequired,
+  ...actorFields,
   accountId: z.string(),
   limit: z.number().optional().default(50),
   status: z.array(z.string()).optional(),
@@ -30,6 +37,7 @@ export const GetCampaignsSchema = z.object({
 
 export const CreateCampaignSchema = z.object({
   tenantId: tenantIdRequired,
+  ...actorFields,
   accountId: z.string(),
   name: z.string(),
   objective: z.string(),
@@ -56,6 +64,7 @@ export const CreateCampaignSchema = z.object({
 
 export const UpdateCampaignSchema = z.object({
   tenantId: tenantIdRequired,
+  ...actorFields,
   campaignId: z.string(),
   name: z.string().optional(),
   status: z.string().optional(),
@@ -64,7 +73,8 @@ export const UpdateCampaignSchema = z.object({
 });
 
 export const GetInsightsSchema = z.object({
-  tenantId: tenantIdOptional,
+  tenantId: tenantIdRequired,
+  ...actorFields,
   accountId: z.string().optional(),
   campaignId: z.string().optional(),
   adSetId: z.string().optional(),
@@ -75,7 +85,8 @@ export const GetInsightsSchema = z.object({
 });
 
 export const GetAdSetsSchema = z.object({
-  tenantId: tenantIdOptional,
+  tenantId: tenantIdRequired,
+  ...actorFields,
   campaignId: z.string(),
   limit: z.number().optional().default(50),
   status: z.array(z.string()).optional(),
@@ -83,6 +94,7 @@ export const GetAdSetsSchema = z.object({
 
 export const CreateAdSetSchema = z.object({
   tenantId: tenantIdRequired,
+  ...actorFields,
   accountId: z.string(),
   campaignId: z.string(),
   name: z.string(),
@@ -114,6 +126,7 @@ export const CreateAdSetSchema = z.object({
 
 export const UpdateAdSetSchema = z.object({
   tenantId: tenantIdRequired,
+  ...actorFields,
   adSetId: z.string(),
   name: z.string().optional(),
   status: z.string().optional(),
@@ -124,7 +137,8 @@ export const UpdateAdSetSchema = z.object({
 });
 
 export const GetAdsSchema = z.object({
-  tenantId: tenantIdOptional,
+  tenantId: tenantIdRequired,
+  ...actorFields,
   adSetId: z.string().optional(),
   campaignId: z.string().optional(),
   limit: z.number().optional().default(50),
@@ -133,6 +147,7 @@ export const GetAdsSchema = z.object({
 
 export const CreateAdSchema = z.object({
   tenantId: tenantIdRequired,
+  ...actorFields,
   accountId: z.string(),
   adSetId: z.string(),
   name: z.string(),
@@ -151,6 +166,7 @@ export const CreateAdSchema = z.object({
 
 export const UpdateAdSchema = z.object({
   tenantId: tenantIdRequired,
+  ...actorFields,
   adId: z.string(),
   name: z.string().optional(),
   status: z.string().optional(),
@@ -170,6 +186,7 @@ export const UpdateAdSchema = z.object({
 
 export const DuplicateCampaignSchema = z.object({
   tenantId: tenantIdRequired,
+  ...actorFields,
   campaignId: z.string(),
   deepCopy: z.boolean().optional().default(true),
   renameStrategy: z
@@ -186,6 +203,7 @@ export const DuplicateCampaignSchema = z.object({
 
 export const DuplicateAdSetSchema = z.object({
   tenantId: tenantIdRequired,
+  ...actorFields,
   adSetId: z.string(),
   campaignId: z.string().optional(),
   deepCopy: z.boolean().optional().default(true),
@@ -203,6 +221,7 @@ export const DuplicateAdSetSchema = z.object({
 
 export const DuplicateAdSchema = z.object({
   tenantId: tenantIdRequired,
+  ...actorFields,
   adId: z.string(),
   adSetId: z.string().optional(),
   renameStrategy: z
@@ -228,6 +247,7 @@ export const tools: Tool[] = [
         limit: { type: 'number', default: 50 },
         fields: { type: 'array', items: { type: 'string' } },
       },
+      required: ['tenantId'],
     },
   },
   {
@@ -240,6 +260,7 @@ export const tools: Tool[] = [
         limit: { type: 'number', default: 50 },
         fields: { type: 'array', items: { type: 'string' } },
       },
+      required: ['tenantId'],
     },
   },
   {
@@ -248,10 +269,10 @@ export const tools: Tool[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        tenantId: { type: 'string', description: 'Tenant ID (optional if accountId can infer tenant)' },
+        tenantId: { type: 'string', description: 'Tenant ID for authorization and isolation checks' },
         accountId: { type: 'string', description: 'Ad account ID (e.g., act_123)' },
       },
-      required: ['accountId'],
+      required: ['tenantId', 'accountId'],
     },
   },
   {
@@ -260,12 +281,12 @@ export const tools: Tool[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        tenantId: { type: 'string', description: 'Tenant ID (optional if accountId can infer tenant)' },
+        tenantId: { type: 'string', description: 'Tenant ID for authorization and isolation checks' },
         accountId: { type: 'string' },
         limit: { type: 'number', default: 50 },
         status: { type: 'array', items: { type: 'string' } },
       },
-      required: ['accountId'],
+      required: ['tenantId', 'accountId'],
     },
   },
   {
@@ -308,7 +329,7 @@ export const tools: Tool[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        tenantId: { type: 'string', description: 'Tenant ID (optional if accountId can infer tenant)' },
+        tenantId: { type: 'string', description: 'Tenant ID for authorization and isolation checks' },
         accountId: { type: 'string' },
         campaignId: { type: 'string' },
         adSetId: { type: 'string' },
@@ -317,7 +338,7 @@ export const tools: Tool[] = [
         fields: { type: 'array', items: { type: 'string' } },
         datePreset: { type: 'string', default: 'last_30d' },
       },
-      required: ['level'],
+      required: ['tenantId', 'level'],
     },
   },
   {
@@ -331,7 +352,7 @@ export const tools: Tool[] = [
         limit: { type: 'number', default: 50 },
         status: { type: 'array', items: { type: 'string' } },
       },
-      required: ['campaignId'],
+      required: ['tenantId', 'campaignId'],
     },
   },
   {
@@ -385,6 +406,7 @@ export const tools: Tool[] = [
         limit: { type: 'number', default: 50 },
         status: { type: 'array', items: { type: 'string' } },
       },
+      required: ['tenantId'],
     },
   },
   {

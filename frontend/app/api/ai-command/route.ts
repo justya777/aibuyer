@@ -4,6 +4,7 @@ import { z } from 'zod';
 import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions';
 import { MCPClient } from '../../../lib/mcp-client';
 import { buildSystemPrompt, parseTrackingUrl, containsFacebookMacros } from '../../../lib/campaign-config';
+import { AuthRequiredError, TenantAccessError, resolveTenantContext } from '@/lib/tenant-context';
 
 function getOpenAIClient(): OpenAI {
   const apiKey = process.env.OPENAI_API_KEY;
@@ -224,11 +225,21 @@ const facebookTools = [
 
 export async function POST(request: NextRequest) {
   try {
+    const context = await resolveTenantContext(request);
     const openai = getOpenAIClient();
     const body = await request.json();
     const { command, accountId } = AICommandSchema.parse(body);
 
-    const mcpClient = new MCPClient();
+    const mcpClient = new MCPClient(context);
+    const appBaseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
+    const internalHeaders: HeadersInit = {
+      'Content-Type': 'application/json',
+      'x-tenant-id': context.tenantId,
+    };
+    const requestCookie = request.headers.get('cookie');
+    if (requestCookie) {
+      internalHeaders['cookie'] = requestCookie;
+    }
 
     // Fetch available materials for this account
     let availableMaterials: any[] = [];
@@ -236,8 +247,9 @@ export async function POST(request: NextRequest) {
     
     try {
       // First try to get materials filtered by account name
-      const materialsResponse = await fetch(`${process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000'}/api/get-materials?adName=${encodeURIComponent(accountId)}`, {
-        method: 'GET'
+      const materialsResponse = await fetch(`${appBaseUrl}/api/get-materials?adName=${encodeURIComponent(accountId)}`, {
+        method: 'GET',
+        headers: internalHeaders,
       });
       if (materialsResponse.ok) {
         const materialsData = await materialsResponse.json();
@@ -248,8 +260,9 @@ export async function POST(request: NextRequest) {
       // If no materials found, fetch ALL materials without filter
       if (availableMaterials.length === 0) {
         console.log(`📎 No filtered materials, fetching ALL materials...`);
-        const allMaterialsResponse = await fetch(`${process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000'}/api/get-materials`, {
-          method: 'GET'
+        const allMaterialsResponse = await fetch(`${appBaseUrl}/api/get-materials`, {
+          method: 'GET',
+          headers: internalHeaders,
         });
         if (allMaterialsResponse.ok) {
           const allMaterialsData = await allMaterialsResponse.json();
@@ -322,9 +335,9 @@ export async function POST(request: NextRequest) {
     let materialAssignments = {};
     if (availableMaterials.length > 0) {
       try {
-        const assignmentResponse = await fetch(`${process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000'}/api/material-assignment`, {
+        const assignmentResponse = await fetch(`${appBaseUrl}/api/material-assignment`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: internalHeaders,
           body: JSON.stringify({ command, materials: availableMaterials })
         });
         if (assignmentResponse.ok) {
@@ -455,6 +468,9 @@ export async function POST(request: NextRequest) {
     let maxIterations = 15; // Increased to allow for multiple ads and bulk operations
     let iteration = 0;
     let campaignId: string | null = null;
+    const toolFailureCounts: Record<string, number> = {};
+    const MAX_CONSECUTIVE_TOOL_FAILURES = 3;
+    let blockingError: string | null = null;
     
     // Detect command type for better handling
     const commandLower = command.toLowerCase();
@@ -528,6 +544,25 @@ export async function POST(request: NextRequest) {
                 } else {
                   console.log(`❌ AI used invalid campaignId: "${toolArgs.campaignId}" and no campaign ID stored yet`);
                   throw new Error('Cannot create adset: No valid campaign ID available. Please create campaign first.');
+                }
+              }
+
+              // Policy requires explicit budget for adset creation.
+              const hasExplicitBudget =
+                toolArgs.dailyBudget != null || toolArgs.lifetimeBudget != null;
+              if (!hasExplicitBudget) {
+                const campaignAction = actions.find(a => a.tool === 'create_campaign' && a.success);
+                const campaignDailyBudget = campaignAction?.result?.budget?.daily;
+                const campaignLifetimeBudget = campaignAction?.result?.budget?.lifetime;
+                if (campaignDailyBudget != null) {
+                  toolArgs.dailyBudget = campaignDailyBudget;
+                  console.log(`⚠️ create_adset missing budget - inherited dailyBudget=${campaignDailyBudget} from campaign`);
+                } else if (campaignLifetimeBudget != null) {
+                  toolArgs.lifetimeBudget = campaignLifetimeBudget;
+                  console.log(`⚠️ create_adset missing budget - inherited lifetimeBudget=${campaignLifetimeBudget} from campaign`);
+                } else {
+                  toolArgs.dailyBudget = 1500;
+                  console.log('⚠️ create_adset missing budget - applied fallback dailyBudget=1500');
                 }
               }
             }
@@ -779,6 +814,7 @@ export async function POST(request: NextRequest) {
             
             // Execute the tool call via MCP client
             const result = await mcpClient.callTool(toolCall.function.name, toolArgs);
+            toolFailureCounts[toolCall.function.name] = 0;
             
             // Store campaign ID for subsequent adset creation
             if (toolCall.function.name === 'create_campaign' && result?.id) {
@@ -809,11 +845,13 @@ export async function POST(request: NextRequest) {
             console.log(`✅ Tool ${toolCall.function.name} executed successfully`);
           } catch (error) {
             console.error(`❌ Tool ${toolCall.function.name} failed:`, error);
+            toolFailureCounts[toolCall.function.name] = (toolFailureCounts[toolCall.function.name] || 0) + 1;
+            const errorMessage = error instanceof Error ? error.message : 'Unknown error';
             actions.push({
               type: getActionType(toolCall.function.name),
               tool: toolCall.function.name,
               arguments: JSON.parse(toolCall.function.arguments),
-              error: error instanceof Error ? error.message : 'Unknown error',
+              error: errorMessage,
               success: false
             });
 
@@ -821,8 +859,22 @@ export async function POST(request: NextRequest) {
             toolResults.push({
               tool_call_id: toolCall.id,
               role: 'tool' as const,
-              content: `Error: ${error instanceof Error ? error.message : 'Unknown error'}`
+              content: `Error: ${errorMessage}`
             });
+
+            if (errorMessage.includes('DSA compliance fields are required')) {
+              blockingError =
+                'Meta DSA compliance fields are missing for EU targeting. Set FB_DSA_BENEFICIARY and FB_DSA_PAYOR in .env, restart the MCP server, then retry.';
+              console.log('🛑 Blocking DSA configuration error encountered. Stopping loop.');
+              conversationComplete = true;
+            }
+
+            if (toolFailureCounts[toolCall.function.name] >= MAX_CONSECUTIVE_TOOL_FAILURES) {
+              console.log(
+                `🛑 Tool ${toolCall.function.name} failed ${toolFailureCounts[toolCall.function.name]} times. Stopping loop.`
+              );
+              conversationComplete = true;
+            }
           }
         }
 
@@ -952,6 +1004,23 @@ export async function POST(request: NextRequest) {
     } else if (campaignsCreated > 0) {
       summaryMessage = `Created ${campaignsCreated} campaign(s), ${adsetsCreated} adset(s), ${adsCreatedCount} ad(s)`;
     }
+
+    if (blockingError) {
+      return NextResponse.json(
+        {
+          success: false,
+          partial: campaignsCreated > 0,
+          actions,
+          reasoning: typeof reasoning === 'string' ? reasoning : 'Command blocked by configuration',
+          error: blockingError,
+          message:
+            campaignsCreated > 0
+              ? `Campaign was created, but downstream steps were blocked. ${blockingError}`
+              : blockingError,
+        },
+        { status: 422 }
+      );
+    }
     
     return NextResponse.json({
       success: true,
@@ -961,7 +1030,12 @@ export async function POST(request: NextRequest) {
     });
 
   } catch (error) {
-    console.error('AI Command API error:', error);
+    if (error instanceof AuthRequiredError) {
+      return NextResponse.json({ success: false, error: error.message }, { status: 401 });
+    }
+    if (error instanceof TenantAccessError) {
+      return NextResponse.json({ success: false, error: error.message }, { status: 403 });
+    }
     return NextResponse.json(
       { 
         success: false, 
