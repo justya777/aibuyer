@@ -1,3 +1,9 @@
+const path = require('path');
+const dotenv = require('dotenv');
+
+// Load monorepo root env for local development.
+dotenv.config({ path: path.resolve(__dirname, '../.env') });
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   // App directory is now stable in Next.js 13+, no experimental flag needed

@@ -14,6 +14,19 @@ import { logger } from './utils/logger.js';
 
 const env = loadEnvConfig();
 
+logger.info('Loaded tenant configuration', {
+  tenantIds: Object.keys(env.tenantAccessMap),
+  tenantAccessMap: Object.fromEntries(
+    Object.entries(env.tenantAccessMap).map(([tenantId, cfg]) => [
+      tenantId,
+      {
+        allowedAdAccountIds: cfg.allowedAdAccountIds,
+        systemUserTokenRef: cfg.systemUserTokenRef,
+      },
+    ])
+  ),
+});
+
 class FacebookMCPServer {
   private readonly server: Server;
   private readonly handlers: FacebookToolHandlers;

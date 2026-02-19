@@ -88,16 +88,41 @@ export class FacebookServiceFacade {
   }
 
   async getAccounts(params: GetAccountsParams): Promise<FacebookAccount[]> {
-    const tenantId = this.requireTenantForTenantOnlyReads(params.tenantId, 'get_accounts');
-    const ctx = this.buildContext(tenantId);
-    const allowedAdAccountIds = this.tenantRegistry.getAllowedAdAccountIds(tenantId);
-    return this.accountsApi.getAccounts(ctx, params, allowedAdAccountIds);
+    const tenantIds = this.resolveTenantIdsForGlobalRead(params.tenantId, 'get_accounts');
+    const results = await Promise.all(
+      tenantIds.map(async (tenantId) => {
+        const ctx = this.buildContext(tenantId);
+        const allowedAdAccountIds = this.tenantRegistry.getAllowedAdAccountIds(tenantId);
+        return this.accountsApi.getAccounts(ctx, params, allowedAdAccountIds);
+      })
+    );
+
+    const byId = new Map<string, FacebookAccount>();
+    for (const group of results) {
+      for (const account of group) {
+        if (!byId.has(account.id)) {
+          byId.set(account.id, account);
+        }
+      }
+    }
+    return Array.from(byId.values());
   }
 
   async getPages(params: GetPagesParams = {}): Promise<FacebookPage[]> {
-    const tenantId = this.requireTenantForTenantOnlyReads(params.tenantId, 'get_pages');
-    const ctx = this.buildContext(tenantId);
-    return this.accountsApi.getPages(ctx, params);
+    const tenantIds = this.resolveTenantIdsForGlobalRead(params.tenantId, 'get_pages');
+    const results = await Promise.all(
+      tenantIds.map(async (tenantId) => this.accountsApi.getPages(this.buildContext(tenantId), params))
+    );
+
+    const byId = new Map<string, FacebookPage>();
+    for (const group of results) {
+      for (const page of group) {
+        if (!byId.has(page.id)) {
+          byId.set(page.id, page);
+        }
+      }
+    }
+    return Array.from(byId.values());
   }
 
   async getPromotablePages(
@@ -349,6 +374,21 @@ export class FacebookServiceFacade {
       throw new Error(`${toolName} requires tenantId because no accountId is available for inference.`);
     }
     return tenantId;
+  }
+
+  private resolveTenantIdsForGlobalRead(tenantId: string | undefined, toolName: string): string[] {
+    if (tenantId) {
+      return [tenantId];
+    }
+
+    const tenantIds = this.tenantRegistry.listTenantIds();
+    if (tenantIds.length === 0) {
+      throw new Error(
+        `${toolName} requires tenant configuration. Add tenants to TENANT_ACCESS_MAP.`
+      );
+    }
+
+    return tenantIds;
   }
 
   private resolveTenantByAccount(

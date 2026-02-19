@@ -70,6 +70,22 @@ export class CampaignsApi {
 
   async getCampaigns(ctx: RequestContext, params: GetCampaignsParams): Promise<FacebookCampaign[]> {
     const accountId = normalizeAdAccountId(params.accountId);
+    const effectiveStatus =
+      params.status && params.status.length > 0
+        ? params.status
+        : [
+            'ACTIVE',
+            'PAUSED',
+            'PENDING_REVIEW',
+            'DISAPPROVED',
+            'PREAPPROVED',
+            'PENDING_BILLING_INFO',
+            'CAMPAIGN_PAUSED',
+            'ADSET_PAUSED',
+            'IN_PROCESS',
+            'WITH_ISSUES',
+          ];
+
     const response = await this.graphClient.request<{ data?: Array<Record<string, unknown>> }>(ctx, {
       method: 'GET',
       path: `${accountId}/campaigns`,
@@ -77,9 +93,7 @@ export class CampaignsApi {
         limit: params.limit || 50,
         fields:
           'id,name,status,objective,account_id,created_time,updated_time,start_time,stop_time,daily_budget,lifetime_budget,budget_remaining',
-        effective_status:
-          params.status?.join(',') ||
-          'ACTIVE,PAUSED,PENDING_REVIEW,DISAPPROVED,PREAPPROVED,PENDING_BILLING_INFO,CAMPAIGN_PAUSED,ADSET_PAUSED,IN_PROCESS,WITH_ISSUES',
+        effective_status: JSON.stringify(effectiveStatus),
       },
     });
 

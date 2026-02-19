@@ -29,6 +29,10 @@ export class TenantRegistry {
     return Boolean(this.getTenantConfig(tenantId));
   }
 
+  listTenantIds(): string[] {
+    return Object.keys(this.tenantAccessMap);
+  }
+
   isAdAccountAllowed(tenantId: string, adAccountId: string): boolean {
     const cfg = this.getTenantConfig(tenantId);
     if (!cfg) return false;

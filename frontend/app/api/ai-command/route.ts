@@ -5,9 +5,16 @@ import type { ChatCompletionMessageParam } from 'openai/resources/chat/completio
 import { MCPClient } from '../../../lib/mcp-client';
 import { buildSystemPrompt, parseTrackingUrl, containsFacebookMacros } from '../../../lib/campaign-config';
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+function getOpenAIClient(): OpenAI {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey || !apiKey.trim()) {
+    throw new Error(
+      'OPENAI_API_KEY is missing. Set it in frontend/.env.local or root .env and restart dev server.'
+    );
+  }
+
+  return new OpenAI({ apiKey });
+}
 
 const AICommandSchema = z.object({
   command: z.string(),
@@ -217,6 +224,7 @@ const facebookTools = [
 
 export async function POST(request: NextRequest) {
   try {
+    const openai = getOpenAIClient();
     const body = await request.json();
     const { command, accountId } = AICommandSchema.parse(body);
 

@@ -1,12 +1,19 @@
 export class MCPClient {
   private requestId = 1;
+  private readonly defaultTenantId: string | undefined;
 
   constructor() {
+    this.defaultTenantId = process.env.FACEBOOK_TENANT_ID || process.env.TENANT_ID;
     console.log('MCP Client initialized - using direct API calls');
   }
 
   async callTool(toolName: string, params: any): Promise<any> {
-    console.log(`MCP Client: Direct call to ${toolName} with params:`, params);
+    const resolvedParams =
+      this.defaultTenantId && params && typeof params === 'object' && !params.tenantId
+        ? { ...params, tenantId: this.defaultTenantId }
+        : params;
+
+    console.log(`MCP Client: Direct call to ${toolName} with params:`, resolvedParams);
     
     try {
       // Make direct HTTP call to our internal MCP server
@@ -19,7 +26,7 @@ export class MCPClient {
           id: this.requestId++,
           params: {
             name: toolName,
-            arguments: params
+            arguments: resolvedParams
           }
         })
       });
