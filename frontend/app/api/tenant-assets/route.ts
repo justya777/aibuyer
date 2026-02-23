@@ -15,9 +15,9 @@ function normalizeAdAccountId(value: string): string {
 export async function GET(request: NextRequest) {
   try {
     const context = await resolveTenantContext(request);
-    const assets = await db.tenantAsset.findMany({
+    const assets = await db.tenantAdAccount.findMany({
       where: { tenantId: context.tenantId },
-      orderBy: { createdAt: 'desc' },
+      orderBy: { updatedAt: 'desc' },
     });
 
     return NextResponse.json({
@@ -27,6 +27,7 @@ export async function GET(request: NextRequest) {
         id: asset.id,
         adAccountId: asset.adAccountId,
         createdAt: asset.createdAt,
+        lastSyncedAt: asset.lastSyncedAt,
       })),
     });
   } catch (error) {
@@ -70,7 +71,26 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const created = await db.tenantAsset.upsert({
+    const created = await db.tenantAdAccount.upsert({
+      where: {
+        tenantId_adAccountId: {
+          tenantId: context.tenantId,
+          adAccountId: normalizedAdAccountId,
+        },
+      },
+      update: {
+        lastSyncedAt: new Date(),
+      },
+      create: {
+        tenantId: context.tenantId,
+        adAccountId: normalizedAdAccountId,
+        name: normalizedAdAccountId,
+        lastSyncedAt: new Date(),
+      },
+    });
+
+    // Temporary compatibility write while legacy read paths still exist.
+    await db.tenantAsset.upsert({
       where: {
         tenantId_adAccountId: {
           tenantId: context.tenantId,

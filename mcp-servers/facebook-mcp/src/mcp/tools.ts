@@ -27,6 +27,23 @@ export const GetPromotablePagesSchema = z.object({
   accountId: z.string(),
 });
 
+export const SyncTenantAssetsSchema = z.object({
+  tenantId: tenantIdRequired,
+  ...actorFields,
+});
+
+export const ListTenantPagesSchema = z.object({
+  tenantId: tenantIdRequired,
+  ...actorFields,
+});
+
+export const SetDefaultPageForAdAccountSchema = z.object({
+  tenantId: tenantIdRequired,
+  ...actorFields,
+  adAccountId: z.string(),
+  pageId: z.string(),
+});
+
 export const GetCampaignsSchema = z.object({
   tenantId: tenantIdRequired,
   ...actorFields,
@@ -44,6 +61,24 @@ export const CreateCampaignSchema = z.object({
   status: z.string().optional().default('PAUSED'),
   dailyBudget: z.number().optional(),
   lifetimeBudget: z.number().optional(),
+  adSetTargeting: z
+    .object({
+      geoLocations: z
+        .object({
+          countries: z.array(z.string()).optional(),
+          regions: z.array(z.string()).optional(),
+          cities: z.array(z.string()).optional(),
+        })
+        .optional(),
+      ageMin: z.number().optional(),
+      ageMax: z.number().optional(),
+      genders: z.array(z.number()).optional(),
+      interests: z.array(z.string()).optional(),
+      behaviors: z.array(z.string()).optional(),
+      customAudiences: z.array(z.string()).optional(),
+      locales: z.array(z.union([z.string(), z.number()])).optional(),
+    })
+    .optional(),
   targeting: z
     .object({
       geoLocations: z
@@ -100,6 +135,13 @@ export const CreateAdSetSchema = z.object({
   name: z.string(),
   optimizationGoal: z.string(),
   billingEvent: z.string(),
+  promotedObject: z
+    .object({
+      pageId: z.string().optional(),
+      pixelId: z.string().optional(),
+      customEventType: z.string().optional(),
+    })
+    .optional(),
   status: z.string().optional().default('PAUSED'),
   dailyBudget: z.number().nullable().optional(),
   lifetimeBudget: z.number().nullable().optional(),
@@ -120,6 +162,11 @@ export const CreateAdSetSchema = z.object({
       behaviors: z.array(z.string()).optional(),
       customAudiences: z.array(z.string()).optional(),
       locales: z.array(z.union([z.string(), z.number()])).optional(),
+      targetingAutomation: z
+        .object({
+          advantageAudience: z.union([z.number(), z.boolean()]).optional(),
+        })
+        .optional(),
     })
     .optional(),
 });
@@ -153,6 +200,7 @@ export const CreateAdSchema = z.object({
   name: z.string(),
   status: z.string().optional().default('PAUSED'),
   creative: z.object({
+    pageId: z.string().optional(),
     title: z.string().optional(),
     body: z.string().optional(),
     imageUrl: z.string().optional(),
@@ -236,6 +284,36 @@ export const DuplicateAdSchema = z.object({
     .default('PAUSED'),
 });
 
+export const PreflightCreateCampaignBundleSchema = z.object({
+  tenantId: tenantIdRequired,
+  ...actorFields,
+  accountId: z.string(),
+  adSetTargeting: z
+    .object({
+      geoLocations: z
+        .object({
+          countries: z.array(z.string()).optional(),
+          regions: z.array(z.string()).optional(),
+          cities: z.array(z.string()).optional(),
+        })
+        .optional(),
+      ageMin: z.number().optional(),
+      ageMax: z.number().optional(),
+      genders: z.array(z.number()).optional(),
+      interests: z.array(z.string()).optional(),
+      behaviors: z.array(z.string()).optional(),
+      customAudiences: z.array(z.string()).optional(),
+      locales: z.array(z.union([z.string(), z.number()])).optional(),
+    })
+    .optional(),
+});
+
+export const AutofillDsaForAdAccountSchema = z.object({
+  tenantId: tenantIdRequired,
+  ...actorFields,
+  adAccountId: z.string(),
+});
+
 export const tools: Tool[] = [
   {
     name: 'get_accounts',
@@ -276,6 +354,41 @@ export const tools: Tool[] = [
     },
   },
   {
+    name: 'sync_tenant_assets',
+    description: 'Sync tenant pages and ad accounts from Business Manager',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tenantId: { type: 'string', description: 'Tenant ID for authorization and isolation checks' },
+      },
+      required: ['tenantId'],
+    },
+  },
+  {
+    name: 'list_tenant_pages',
+    description: 'List tenant pages discovered via sync',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tenantId: { type: 'string', description: 'Tenant ID for authorization and isolation checks' },
+      },
+      required: ['tenantId'],
+    },
+  },
+  {
+    name: 'set_default_page_for_ad_account',
+    description: 'Set default page for a tenant ad account',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tenantId: { type: 'string', description: 'Tenant ID for authorization and isolation checks' },
+        adAccountId: { type: 'string', description: 'Ad account ID (e.g., act_123)' },
+        pageId: { type: 'string', description: 'Page ID selected for this ad account' },
+      },
+      required: ['tenantId', 'adAccountId', 'pageId'],
+    },
+  },
+  {
     name: 'get_campaigns',
     description: 'Retrieve campaigns for a specific Facebook ad account',
     inputSchema: {
@@ -302,6 +415,7 @@ export const tools: Tool[] = [
         status: { type: 'string', default: 'PAUSED' },
         dailyBudget: { type: 'number' },
         lifetimeBudget: { type: 'number' },
+        adSetTargeting: { type: 'object' },
         targeting: { type: 'object' },
       },
       required: ['tenantId', 'accountId', 'name', 'objective'],
@@ -367,6 +481,7 @@ export const tools: Tool[] = [
         name: { type: 'string' },
         optimizationGoal: { type: 'string' },
         billingEvent: { type: 'string' },
+        promotedObject: { type: 'object' },
         status: { type: 'string', default: 'PAUSED' },
         dailyBudget: { type: 'number' },
         lifetimeBudget: { type: 'number' },
@@ -441,6 +556,31 @@ export const tools: Tool[] = [
     },
   },
   {
+    name: 'preflight_create_campaign_bundle',
+    description: 'Preflight campaign bundle creation to validate DSA requirements before create campaign',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tenantId: { type: 'string' },
+        accountId: { type: 'string' },
+        adSetTargeting: { type: 'object' },
+      },
+      required: ['tenantId', 'accountId'],
+    },
+  },
+  {
+    name: 'autofill_dsa_for_ad_account',
+    description: 'Autofill DSA beneficiary/payor for an ad account from Meta recommendations',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tenantId: { type: 'string' },
+        adAccountId: { type: 'string' },
+      },
+      required: ['tenantId', 'adAccountId'],
+    },
+  },
+  {
     name: 'duplicate_campaign',
     description: 'Duplicate a campaign using Facebook native endpoint',
     inputSchema: {
@@ -498,6 +638,9 @@ export const toolSchemas = {
   get_accounts: GetAccountsSchema,
   get_pages: GetPagesSchema,
   get_promotable_pages: GetPromotablePagesSchema,
+  sync_tenant_assets: SyncTenantAssetsSchema,
+  list_tenant_pages: ListTenantPagesSchema,
+  set_default_page_for_ad_account: SetDefaultPageForAdAccountSchema,
   get_campaigns: GetCampaignsSchema,
   create_campaign: CreateCampaignSchema,
   update_campaign: UpdateCampaignSchema,
@@ -508,6 +651,8 @@ export const toolSchemas = {
   get_ads: GetAdsSchema,
   create_ad: CreateAdSchema,
   update_ad: UpdateAdSchema,
+  preflight_create_campaign_bundle: PreflightCreateCampaignBundleSchema,
+  autofill_dsa_for_ad_account: AutofillDsaForAdAccountSchema,
   duplicate_campaign: DuplicateCampaignSchema,
   duplicate_adset: DuplicateAdSetSchema,
   duplicate_ad: DuplicateAdSchema,

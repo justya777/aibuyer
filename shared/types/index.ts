@@ -1,5 +1,6 @@
 export interface FacebookAccount {
   id: string;
+  businessId?: string;
   name: string;
   status: 'active' | 'inactive' | 'limited' | 'disabled';
   currency: string;
@@ -24,6 +25,48 @@ export interface FacebookAccount {
   // Current campaigns count
   activeCampaigns: number;
   totalCampaigns: number;
+}
+
+export interface BusinessPortfolio {
+  tenantId: string;
+  businessId: string;
+  label?: string | null;
+  lastSyncAt?: Date | string | null;
+  createdAt: Date | string;
+}
+
+export interface TenantAdAccountView {
+  id: string;
+  tenantId: string;
+  businessId: string;
+  adAccountId: string;
+  name: string;
+  status: string | null;
+  currency: string | null;
+  timezoneName: string | null;
+  lastSyncedAt: Date | string;
+  defaultPageId: string | null;
+  dsaBeneficiary: string | null;
+  dsaPayor: string | null;
+  dsaSource: string | null;
+  dsaUpdatedAt: Date | string | null;
+}
+
+export interface TenantPageView {
+  id: string;
+  tenantId: string;
+  businessId: string;
+  pageId: string;
+  name: string;
+  source: 'CONFIRMED_BM' | 'FALLBACK_UNVERIFIED';
+  confirmed: boolean;
+  lastSeenAt?: Date | string;
+}
+
+export interface AppSelectionState {
+  selectedTenantId: string | null;
+  selectedBusinessId: string | null;
+  selectedAdAccountId: string | null;
 }
 
 export interface Campaign {

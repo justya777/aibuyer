@@ -35,4 +35,42 @@ describe('tenant isolation guardrail', () => {
 
     expect(httpClient.request).not.toHaveBeenCalled();
   });
+
+  it('blocks cross-tenant page access before Meta call', async () => {
+    const tokenProvider: TokenProvider = {
+      getToken: jest.fn(async () => 'global-token'),
+    };
+
+    const httpClient = {
+      request: jest.fn(),
+    };
+
+    const tenantRegistry = {
+      assertTenantAccessible: jest.fn(async () => undefined),
+      assertAdAccountAllowed: jest.fn(async () => undefined),
+      assertPageAllowed: jest.fn(async () => {
+        throw new TenantIsolationError('forbidden page');
+      }),
+    } as any;
+
+    const client = new GraphClient(tokenProvider, {
+      apiVersion: 'v23.0',
+      retry: { maxRetries: 0, baseDelayMs: 1, maxDelayMs: 1, jitterMs: 0 },
+      httpClient: httpClient as any,
+      tenantRegistry,
+    });
+
+    await expect(
+      client.request(
+        { tenantId: 'tenant-a', userId: 'user-a', adAccountId: 'act_999' },
+        {
+          method: 'POST',
+          path: 'act_999/adsets',
+          body: { promotedObject: { pageId: '123' } },
+        }
+      )
+    ).rejects.toThrow(TenantIsolationError);
+
+    expect(httpClient.request).not.toHaveBeenCalled();
+  });
 });

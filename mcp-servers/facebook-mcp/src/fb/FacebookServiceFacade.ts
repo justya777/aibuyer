@@ -1,4 +1,5 @@
 import type {
+  AutofillDsaParams,
   CreateAdParams,
   CreateAdSetParams,
   CreateCampaignParams,
@@ -16,26 +17,34 @@ import type {
   GetAdsParams,
   GetCampaignsParams,
   GetInsightsParams,
+  ListTenantPagesParams,
   GetPagesParams,
+  PreflightCreateCampaignBundleParams,
+  SetDefaultPageForAdAccountParams,
+  SyncTenantAssetsParams,
+  TenantPageOption,
   UpdateAdParams,
   UpdateAdSetParams,
   UpdateCampaignParams,
 } from '../types/facebook.js';
 import { AuditResult } from '@prisma/client';
 import { getEnvConfig, type EnvConfig } from '../config/env.js';
+import { prisma } from '../db/prisma.js';
 import { AccountsApi } from './accounts.js';
 import { AdSetsApi } from './adsets.js';
 import { AdsApi } from './ads.js';
 import { CampaignsApi } from './campaigns.js';
 import { GraphClient } from './core/graph-client.js';
+import { PageResolver } from './core/page-resolution.js';
 import { PolicyEngine } from './core/policy-engine.js';
-import { TenantRegistry } from './core/tenant-registry.js';
+import { normalizeAdAccountId, normalizePageId, TenantRegistry } from './core/tenant-registry.js';
 import type { RequestContext } from './core/types.js';
 import { EnvTokenProvider } from './core/token-provider.js';
 import { InsightsApi } from './insights.js';
 import { TargetingApi } from './targeting.js';
 import { AuditLogService } from '../services/audit-log-service.js';
 import { PolicyViolationError, TenantIsolationError } from './core/types.js';
+import { DsaComplianceError, DsaService, extractCountryCodesFromTargeting, isEuTargeting } from './dsa.js';
 
 type MutationWithWarnings<T> = T & { policyWarnings?: string[] };
 
@@ -45,6 +54,7 @@ interface FacadeDependencies {
   graphClient?: GraphClient;
   policyEngine?: PolicyEngine;
   auditLogService?: AuditLogService;
+  dsaService?: DsaService;
 }
 
 interface ActorContext {
@@ -65,12 +75,16 @@ export class FacebookServiceFacade {
   private readonly adsApi: AdsApi;
   private readonly insightsApi: InsightsApi;
   private readonly auditLogService: AuditLogService;
+  private readonly dsaService: DsaService;
 
   constructor(deps: FacadeDependencies = {}) {
     this.env = deps.env || getEnvConfig();
     this.tenantRegistry = deps.tenantRegistry || new TenantRegistry();
 
-    const tokenProvider = new EnvTokenProvider(this.env.metaSystemUserToken);
+    const tokenProvider = new EnvTokenProvider({
+      tenantTokenMapRaw: this.env.tenantSuTokenMapRaw,
+      globalToken: this.env.globalSystemUserToken,
+    });
     this.graphClient =
       deps.graphClient ||
       new GraphClient(tokenProvider, {
@@ -81,14 +95,13 @@ export class FacebookServiceFacade {
 
     this.policyEngine = deps.policyEngine || new PolicyEngine(this.env.policy);
     this.auditLogService = deps.auditLogService || new AuditLogService();
+    this.dsaService = deps.dsaService || new DsaService(this.graphClient);
+    const pageResolver = new PageResolver(this.tenantRegistry);
     this.targetingApi = new TargetingApi(this.graphClient);
     this.accountsApi = new AccountsApi(this.graphClient);
     this.campaignsApi = new CampaignsApi(this.graphClient);
-    this.adSetsApi = new AdSetsApi(this.graphClient, this.targetingApi, {
-      dsaBeneficiary: this.env.fbDsaBeneficiary,
-      dsaPayor: this.env.fbDsaPayor,
-    });
-    this.adsApi = new AdsApi(this.graphClient, { defaultPageId: this.env.fbPageId });
+    this.adSetsApi = new AdSetsApi(this.graphClient, this.targetingApi, this.dsaService, pageResolver);
+    this.adsApi = new AdsApi(this.graphClient, pageResolver);
     this.insightsApi = new InsightsApi(this.graphClient, this.env.insightsCacheTtlMs);
   }
 
@@ -117,6 +130,65 @@ export class FacebookServiceFacade {
   async getPages(params: GetPagesParams): Promise<FacebookPage[]> {
     const actor = await this.requireActor(params, 'get_pages');
     return this.accountsApi.getPages(this.buildContext(actor), params);
+  }
+
+  async listTenantPages(params: ListTenantPagesParams): Promise<TenantPageOption[]> {
+    const actor = await this.requireActor(params, 'list_tenant_pages');
+    return this.accountsApi.listTenantPages(this.buildContext(actor));
+  }
+
+  async syncTenantAssets(params: SyncTenantAssetsParams): Promise<{
+    tenantId: string;
+    businessId: string;
+    fallbackPagesUsed: boolean;
+    pagesSynced: number;
+    adAccountsSynced: number;
+    autoAssignedDefaultPageId: string | null;
+  }> {
+    const actor = await this.requireActor(params, 'sync_tenant_assets');
+    return this.accountsApi.syncTenantAssets(this.buildContext(actor));
+  }
+
+  async setDefaultPageForAdAccount(
+    params: SetDefaultPageForAdAccountParams
+  ): Promise<{ adAccountId: string; defaultPageId: string }> {
+    const actor = await this.requireActor(params, 'set_default_page_for_ad_account');
+    const normalizedAdAccountId = normalizeAdAccountId(params.adAccountId);
+    const normalizedPageId = normalizePageId(params.pageId);
+    await this.tenantRegistry.assertAdAccountAllowed(
+      actor.tenantId,
+      normalizedAdAccountId,
+      actor.userId,
+      actor.isPlatformAdmin
+    );
+    await this.tenantRegistry.assertPageAllowed(
+      actor.tenantId,
+      normalizedPageId,
+      actor.userId,
+      actor.isPlatformAdmin
+    );
+
+    await prisma.adAccountSettings.upsert({
+      where: {
+        tenantId_adAccountId: {
+          tenantId: actor.tenantId,
+          adAccountId: normalizedAdAccountId,
+        },
+      },
+      update: {
+        defaultPageId: normalizedPageId,
+      },
+      create: {
+        tenantId: actor.tenantId,
+        adAccountId: normalizedAdAccountId,
+        defaultPageId: normalizedPageId,
+      },
+    });
+    await this.accountsApi.confirmFallbackPageSelection(this.buildContext(actor), normalizedPageId);
+    return {
+      adAccountId: normalizedAdAccountId,
+      defaultPageId: normalizedPageId,
+    };
   }
 
   async getPromotablePages(
@@ -156,6 +228,13 @@ export class FacebookServiceFacade {
       actor.userId,
       actor.isPlatformAdmin
     );
+    await this.preflightCreateCampaignBundle({
+      tenantId: actor.tenantId,
+      userId: actor.userId,
+      isPlatformAdmin: actor.isPlatformAdmin,
+      accountId: params.accountId,
+      adSetTargeting: params.adSetTargeting,
+    });
     const ctx = this.buildContext(actor, { adAccountId: params.accountId });
     const evaluation = this.policyEngine.evaluateMutation({
       tenantId: actor.tenantId,
@@ -195,6 +274,50 @@ export class FacebookServiceFacade {
       );
       throw error;
     }
+  }
+
+  async preflightCreateCampaignBundle(
+    params: PreflightCreateCampaignBundleParams
+  ): Promise<{ ok: true; euTargeting: boolean }> {
+    const actor = await this.requireActor(params, 'preflight_create_campaign_bundle');
+    await this.tenantRegistry.assertAdAccountAllowed(
+      actor.tenantId,
+      params.accountId,
+      actor.userId,
+      actor.isPlatformAdmin
+    );
+    const countries = extractCountryCodesFromTargeting(params.adSetTargeting);
+    const euTargeting = isEuTargeting(countries);
+    if (!euTargeting) {
+      return { ok: true, euTargeting: false };
+    }
+
+    await this.dsaService.ensureDsaForAdAccount(
+      this.buildContext(actor, { adAccountId: params.accountId }),
+      params.accountId
+    );
+    return { ok: true, euTargeting: true };
+  }
+
+  async autofillDsaForAdAccount(
+    params: AutofillDsaParams
+  ): Promise<{ adAccountId: string; source: string; updatedAt: Date }> {
+    const actor = await this.requireActor(params, 'autofill_dsa_for_ad_account');
+    await this.tenantRegistry.assertAdAccountAllowed(
+      actor.tenantId,
+      params.adAccountId,
+      actor.userId,
+      actor.isPlatformAdmin
+    );
+    const settings = await this.dsaService.ensureDsaForAdAccount(
+      this.buildContext(actor, { adAccountId: params.adAccountId }),
+      params.adAccountId
+    );
+    return {
+      adAccountId: params.adAccountId,
+      source: settings.dsaSource,
+      updatedAt: settings.dsaUpdatedAt,
+    };
   }
 
   async updateCampaign(params: UpdateCampaignParams): Promise<MutationWithWarnings<FacebookCampaign>> {
@@ -746,7 +869,11 @@ export class FacebookServiceFacade {
   }
 
   private classifyAuditResult(error: unknown): AuditResult {
-    if (error instanceof PolicyViolationError || error instanceof TenantIsolationError) {
+    if (
+      error instanceof PolicyViolationError ||
+      error instanceof TenantIsolationError ||
+      error instanceof DsaComplianceError
+    ) {
       return AuditResult.BLOCKED;
     }
     return AuditResult.ERROR;

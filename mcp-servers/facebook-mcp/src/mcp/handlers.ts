@@ -8,6 +8,7 @@ import {
   CreateAdSchema,
   CreateAdSetSchema,
   CreateCampaignSchema,
+  AutofillDsaForAdAccountSchema,
   DuplicateAdSchema,
   DuplicateAdSetSchema,
   DuplicateCampaignSchema,
@@ -18,6 +19,10 @@ import {
   GetInsightsSchema,
   GetPagesSchema,
   GetPromotablePagesSchema,
+  ListTenantPagesSchema,
+  PreflightCreateCampaignBundleSchema,
+  SetDefaultPageForAdAccountSchema,
+  SyncTenantAssetsSchema,
   UpdateAdSchema,
   UpdateAdSetSchema,
   UpdateCampaignSchema,
@@ -64,6 +69,18 @@ export class FacebookToolHandlers {
           parsed.isPlatformAdmin
         );
       }
+      case 'sync_tenant_assets': {
+        const parsed = parseArgs(SyncTenantAssetsSchema, args);
+        return this.facebookService.syncTenantAssets(parsed);
+      }
+      case 'list_tenant_pages': {
+        const parsed = parseArgs(ListTenantPagesSchema, args);
+        return this.facebookService.listTenantPages(parsed);
+      }
+      case 'set_default_page_for_ad_account': {
+        const parsed = parseArgs(SetDefaultPageForAdAccountSchema, args);
+        return this.facebookService.setDefaultPageForAdAccount(parsed);
+      }
       case 'get_campaigns': {
         const parsed = parseArgs(GetCampaignsSchema, args);
         return this.facebookService.getCampaigns(parsed);
@@ -71,6 +88,14 @@ export class FacebookToolHandlers {
       case 'create_campaign': {
         const parsed = parseArgs(CreateCampaignSchema, args);
         return this.facebookService.createCampaign(parsed);
+      }
+      case 'preflight_create_campaign_bundle': {
+        const parsed = parseArgs(PreflightCreateCampaignBundleSchema, args);
+        return this.facebookService.preflightCreateCampaignBundle(parsed);
+      }
+      case 'autofill_dsa_for_ad_account': {
+        const parsed = parseArgs(AutofillDsaForAdAccountSchema, args);
+        return this.facebookService.autofillDsaForAdAccount(parsed);
       }
       case 'update_campaign': {
         const parsed = parseArgs(UpdateCampaignSchema, args);

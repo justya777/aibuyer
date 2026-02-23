@@ -13,10 +13,22 @@ import {
 
 interface AICommandCenterProps {
   selectedAccount: FacebookAccount | null
+  selectedTenantId?: string | null
+  selectedBusinessId?: string | null
+  requiresDefaultPage?: boolean
+  onNavigateToDefaultPage?: () => void
   onActionComplete: (action: AIAction) => void
 }
 
-export default function AICommandCenter({ selectedAccount, onActionComplete }: AICommandCenterProps) {
+export default function AICommandCenter({
+  selectedAccount,
+  selectedTenantId,
+  selectedBusinessId,
+  requiresDefaultPage = false,
+  onNavigateToDefaultPage,
+  onActionComplete,
+}: AICommandCenterProps) {
+  const COMMAND_TIMEOUT_MS = 120000
   const [command, setCommand] = useState('')
   const [isProcessing, setIsProcessing] = useState(false)
   const [uploadedFiles, setUploadedFiles] = useState<any[]>([])
@@ -26,9 +38,9 @@ export default function AICommandCenter({ selectedAccount, onActionComplete }: A
     'Create a leads campaign for Romanian men on romanian language aged 20-45 interested in investments with $15 daily budget with the link https://domain.com/test?utm_campaign={{campaign.name}}&utm_source={{site_source_name}}',
     // 'Create a traffic campaign for US users aged 25-45 interested in technology with $20 daily budget',
     // 'Create a sales campaign for European small business owners aged 30-55 with $25 daily budget',
-    'Activate all campaigns',
-    'Pause all campaigns with CTR below 1%',
-    'Create leads campaign with 2 ads - use pr.mp4 for first ad, man.jpeg for 2nd for Romanian men on romanian language aged 20-45 interested in investments with $15 daily budget with the link https://domain.com/test?utm_campaign={{campaign.name}}&utm_source={{site_source_name}}',
+    // 'Activate all campaigns',
+    // 'Pause all campaigns with CTR below 1%',
+    // 'Create leads campaign with 2 ads - use pr.mp4 for first ad, man.jpeg for 2nd for Romanian men on romanian language aged 20-45 interested in investments with $15 daily budget with the link https://domain.com/test?utm_campaign={{campaign.name}}&utm_source={{site_source_name}}',
 
   ])
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -82,25 +94,42 @@ export default function AICommandCenter({ selectedAccount, onActionComplete }: A
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!command.trim() || !selectedAccount) return
+    if (!command.trim() || !selectedAccount || !selectedBusinessId) return
 
     setIsProcessing(true)
 
     try {
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), COMMAND_TIMEOUT_MS)
+
       // Call the AI API endpoint
       const response = await fetch('/api/ai-command', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
+        signal: controller.signal,
         body: JSON.stringify({
           command: command,
           accountId: selectedAccount.id,
+          tenantId: selectedTenantId || undefined,
+          businessId: selectedBusinessId,
         }),
+      }).finally(() => {
+        clearTimeout(timeout)
       })
 
       if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`)
+        const errorPayload = await response.json().catch(() => null)
+        const baseMessage =
+          errorPayload?.message ||
+          errorPayload?.error ||
+          `HTTP error! status: ${response.status}`
+        const nextSteps =
+          Array.isArray(errorPayload?.nextSteps) && errorPayload.nextSteps.length > 0
+            ? ` Next steps: ${errorPayload.nextSteps.join(' ')}`
+            : ''
+        throw new Error(`${baseMessage}${nextSteps}`)
       }
 
       const result = await response.json()
@@ -135,6 +164,13 @@ export default function AICommandCenter({ selectedAccount, onActionComplete }: A
 
       setCommand('')
     } catch (error) {
+      const displayError =
+        error instanceof Error && error.name === 'AbortError'
+          ? `Request timed out after ${COMMAND_TIMEOUT_MS / 1000}s`
+          : error instanceof Error
+            ? error.message
+            : 'Unknown error occurred'
+
       console.error('Error processing AI command:', error)
       
       // Create error action
@@ -144,13 +180,13 @@ export default function AICommandCenter({ selectedAccount, onActionComplete }: A
         type: 'campaign_create',
         accountId: selectedAccount.id,
         action: `Failed to process command: "${command}"`,
-        reasoning: `Error occurred while processing your request: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        reasoning: `Error occurred while processing your request: ${displayError}`,
         parameters: {
           command: command,
           accountId: selectedAccount.id,
         },
         result: 'error',
-        errorMessage: error instanceof Error ? error.message : 'Unknown error occurred',
+        errorMessage: displayError,
         executionTime: 800
       }
       onActionComplete(errorAction)
@@ -176,13 +212,37 @@ export default function AICommandCenter({ selectedAccount, onActionComplete }: A
         </p> */}
       </div>
 
-      {!selectedAccount && (
+      {!selectedBusinessId && (
         <div className="mb-4 p-3 bg-yellow-50 border border-yellow-200 rounded-md">
           <div className="flex">
             <ExclamationTriangleIcon className="w-5 h-5 text-yellow-400 mr-2 flex-shrink-0" />
             <p className="text-sm text-yellow-700">
-              Select an account from the sidebar to start giving commands
+              Select a Business Portfolio to start giving commands.
             </p>
+          </div>
+        </div>
+      )}
+      {selectedBusinessId && !selectedAccount && (
+        <div className="mb-4 p-3 bg-yellow-50 border border-yellow-200 rounded-md">
+          <div className="flex">
+            <ExclamationTriangleIcon className="w-5 h-5 text-yellow-400 mr-2 flex-shrink-0" />
+            <p className="text-sm text-yellow-700">Select an Ad Account for this Business Portfolio.</p>
+          </div>
+        </div>
+      )}
+      {selectedBusinessId && selectedAccount && requiresDefaultPage && (
+        <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-md">
+          <div className="flex items-start justify-between gap-3">
+            <p className="text-sm text-amber-800">
+              No default Page is set for this Ad Account. Lead or link objectives require a default Page.
+            </p>
+            <button
+              type="button"
+              className="text-xs px-2 py-1 border border-amber-300 rounded text-amber-800 hover:bg-amber-100"
+              onClick={() => onNavigateToDefaultPage?.()}
+            >
+              Set default Page
+            </button>
           </div>
         </div>
       )}
@@ -249,13 +309,15 @@ export default function AICommandCenter({ selectedAccount, onActionComplete }: A
             ref={textareaRef}
             value={command}
             onChange={(e) => setCommand(e.target.value)}
-            placeholder={selectedAccount 
+            placeholder={selectedBusinessId && selectedAccount
               ? uploadedFiles.length > 0
                 ? `e.g., Create campaigns using ${uploadedFiles.map(f => f.originalName).join(', ')} - specify which files to use for each adset`
                 : "e.g., Create a traffic campaign for Romanian users aged 25-45 interested in fitness with $50 daily budget"
-              : "Select an account to start..."
+              : !selectedBusinessId
+                ? "Select a Business Portfolio to start..."
+                : "Select an Ad Account to start..."
             }
-            disabled={!selectedAccount || isProcessing}
+            disabled={!selectedBusinessId || !selectedAccount || isProcessing}
             className="w-full p-3 pr-20 border border-gray-300 rounded-md resize-none focus:ring-2 focus:ring-facebook-500 focus:border-facebook-500 disabled:bg-gray-50 disabled:text-gray-500"
             rows={4}
           />
@@ -263,7 +325,7 @@ export default function AICommandCenter({ selectedAccount, onActionComplete }: A
             <button
               type="button"
               onClick={() => setShowUploadZone(!showUploadZone)}
-              disabled={!selectedAccount}
+              disabled={!selectedBusinessId || !selectedAccount}
               className="p-2 text-gray-400 hover:text-gray-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               title="Upload materials"
             >
@@ -271,7 +333,7 @@ export default function AICommandCenter({ selectedAccount, onActionComplete }: A
             </button>
             <button
               type="submit"
-              disabled={!command.trim() || !selectedAccount || isProcessing}
+              disabled={!command.trim() || !selectedBusinessId || !selectedAccount || isProcessing}
               className="p-2 bg-facebook-600 text-white rounded-md hover:bg-facebook-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
               {isProcessing ? (
@@ -291,7 +353,7 @@ export default function AICommandCenter({ selectedAccount, onActionComplete }: A
             <button
               key={index}
               onClick={() => handleSuggestionClick(suggestion)}
-              disabled={!selectedAccount || isProcessing}
+              disabled={!selectedBusinessId || !selectedAccount || isProcessing}
               className="w-full text-left p-3 text-sm bg-gray-50 hover:bg-gray-100 border border-gray-200 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {suggestion}

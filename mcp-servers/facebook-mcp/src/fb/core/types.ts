@@ -3,6 +3,7 @@ export interface RequestContext {
   userId?: string;
   isPlatformAdmin?: boolean;
   adAccountId?: string;
+  pageId?: string;
   campaignId?: string;
   adSetId?: string;
   adId?: string;

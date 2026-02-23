@@ -61,8 +61,41 @@ export default function AccountsGrid({
     }
   }
 
+  const addAccountPanel = (
+    <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
+      <h4 className="text-sm font-medium text-gray-900 mb-2">Assign ad account to tenant</h4>
+      <div className="flex items-center gap-2">
+        <input
+          type="text"
+          value={newAdAccountId}
+          onChange={(event) => setNewAdAccountId(event.target.value)}
+          placeholder="act_1234567890"
+          className="flex-1 border border-gray-300 rounded-md px-3 py-2 text-sm"
+        />
+        <button
+          onClick={handleAddAdAccount}
+          disabled={isAddingAccount || !newAdAccountId.trim()}
+          className="px-3 py-2 bg-facebook-600 text-white rounded-md text-sm disabled:opacity-50"
+        >
+          {isAddingAccount ? 'Adding...' : 'Add'}
+        </button>
+      </div>
+      <p className="text-xs text-gray-500 mt-2">
+        This stores the mapping in `TenantAsset`, then account listing is filtered by tenant.
+      </p>
+      {addAccountMessage ? (
+        <p className="text-xs mt-2 text-gray-700">{addAccountMessage}</p>
+      ) : null}
+    </div>
+  )
+
   if (selectedAccount) {
-    return <AccountDetails account={selectedAccount} campaignRefreshKey={campaignRefreshKey} />
+    return (
+      <div className="space-y-4">
+        {addAccountPanel}
+        <AccountDetails account={selectedAccount} campaignRefreshKey={campaignRefreshKey} />
+      </div>
+    )
   }
 
   return (
@@ -84,97 +117,78 @@ export default function AccountsGrid({
           <p className="text-gray-500 mb-6 max-w-md mx-auto">
             No ad accounts are assigned to this tenant yet. Add an `act_...` account below.
           </p>
-          <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 max-w-lg mx-auto">
-            <h4 className="text-sm font-medium text-gray-900 mb-2">Assign ad account to tenant</h4>
-            <div className="flex items-center gap-2">
-              <input
-                type="text"
-                value={newAdAccountId}
-                onChange={(event) => setNewAdAccountId(event.target.value)}
-                placeholder="act_1234567890"
-                className="flex-1 border border-gray-300 rounded-md px-3 py-2 text-sm"
-              />
-              <button
-                onClick={handleAddAdAccount}
-                disabled={isAddingAccount || !newAdAccountId.trim()}
-                className="px-3 py-2 bg-facebook-600 text-white rounded-md text-sm disabled:opacity-50"
-              >
-                {isAddingAccount ? 'Adding...' : 'Add'}
-              </button>
-            </div>
-            <p className="text-xs text-gray-500 mt-2">
-              This stores the mapping in `TenantAsset`, then account listing is filtered by tenant.
-            </p>
-            {addAccountMessage ? (
-              <p className="text-xs mt-2 text-gray-700">{addAccountMessage}</p>
-            ) : null}
+          <div className="max-w-lg mx-auto">
+            {addAccountPanel}
           </div>
         </div>
       ) : (
-        <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6">
-          {accounts.map((account) => (
-          <div
-            key={account.id}
-            onClick={() => onSelectAccount(account)}
-            className="metric-card cursor-pointer hover:ring-2 hover:ring-facebook-500 hover:ring-opacity-50 transition-all"
-          >
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-medium text-gray-900 truncate">
-                {account.name}
-              </h3>
-              <span className={clsx(
-                'px-2 py-1 rounded-full text-xs font-medium',
-                `status-${account.status}`
-              )}>
-                {account.status}
-              </span>
-            </div>
+        <div className="space-y-6">
+          {addAccountPanel}
+          <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6">
+            {accounts.map((account) => (
+              <div
+                key={account.id}
+                onClick={() => onSelectAccount(account)}
+                className="metric-card cursor-pointer hover:ring-2 hover:ring-facebook-500 hover:ring-opacity-50 transition-all"
+              >
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-lg font-medium text-gray-900 truncate">
+                    {account.name}
+                  </h3>
+                  <span className={clsx(
+                    'px-2 py-1 rounded-full text-xs font-medium',
+                    `status-${account.status}`
+                  )}>
+                    {account.status}
+                  </span>
+                </div>
 
-            <div className="grid grid-cols-2 gap-4 mb-4">
-              <div className="flex items-center space-x-2">
-                <div className="w-8 h-8 bg-green-100 rounded-lg flex items-center justify-center">
-                  <CursorArrowRaysIcon className="w-4 h-4 text-green-600" />
+                <div className="grid grid-cols-2 gap-4 mb-4">
+                  <div className="flex items-center space-x-2">
+                    <div className="w-8 h-8 bg-green-100 rounded-lg flex items-center justify-center">
+                      <CursorArrowRaysIcon className="w-4 h-4 text-green-600" />
+                    </div>
+                    <div>
+                      <p className="text-xs text-gray-500">CTR</p>
+                      <p className="text-sm font-semibold">{account.metrics.ctr}%</p>
+                    </div>
+                  </div>
+                  
+                  <div className="flex items-center space-x-2">
+                    <div className="w-8 h-8 bg-blue-100 rounded-lg flex items-center justify-center">
+                      <BanknotesIcon className="w-4 h-4 text-blue-600" />
+                    </div>
+                    <div>
+                      <p className="text-xs text-gray-500">CPM</p>
+                      <p className="text-sm font-semibold">${account.metrics.cpm}</p>
+                    </div>
+                  </div>
                 </div>
-                <div>
-                  <p className="text-xs text-gray-500">CTR</p>
-                  <p className="text-sm font-semibold">{account.metrics.ctr}%</p>
-                </div>
-              </div>
-              
-              <div className="flex items-center space-x-2">
-                <div className="w-8 h-8 bg-blue-100 rounded-lg flex items-center justify-center">
-                  <BanknotesIcon className="w-4 h-4 text-blue-600" />
-                </div>
-                <div>
-                  <p className="text-xs text-gray-500">CPM</p>
-                  <p className="text-sm font-semibold">${account.metrics.cpm}</p>
-                </div>
-              </div>
-            </div>
 
-            <div className="space-y-2 mb-4">
-              <div className="flex justify-between">
-                <span className="text-sm text-gray-600">Spend</span>
-                <span className="text-sm font-medium">${account.metrics.spend.toLocaleString()}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-sm text-gray-600">Budget</span>
-                <span className="text-sm font-medium">${account.metrics.budget.toLocaleString()}</span>
-              </div>
-              <div className="w-full bg-gray-200 rounded-full h-2">
-                <div 
-                  className="bg-facebook-600 h-2 rounded-full" 
-                  style={{ width: `${(account.metrics.spend / account.metrics.budget) * 100}%` }}
-                ></div>
-              </div>
-            </div>
+                <div className="space-y-2 mb-4">
+                  <div className="flex justify-between">
+                    <span className="text-sm text-gray-600">Spend</span>
+                    <span className="text-sm font-medium">${account.metrics.spend.toLocaleString()}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-sm text-gray-600">Budget</span>
+                    <span className="text-sm font-medium">${account.metrics.budget.toLocaleString()}</span>
+                  </div>
+                  <div className="w-full bg-gray-200 rounded-full h-2">
+                    <div
+                      className="bg-facebook-600 h-2 rounded-full"
+                      style={{ width: `${(account.metrics.spend / account.metrics.budget) * 100}%` }}
+                    ></div>
+                  </div>
+                </div>
 
-            <div className="flex justify-between text-xs text-gray-500">
-              <span>{account.activeCampaigns} active campaigns</span>
-              <span>Last activity: {new Date(account.lastActivity).toLocaleDateString('en-US')}</span>
-            </div>
+                <div className="flex justify-between text-xs text-gray-500">
+                  <span>{account.activeCampaigns} active campaigns</span>
+                  <span>Last activity: {new Date(account.lastActivity).toLocaleDateString('en-US')}</span>
+                </div>
+              </div>
+            ))}
           </div>
-          ))}
         </div>
       )}
     </div>

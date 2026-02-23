@@ -15,6 +15,8 @@ import { loadEnvConfig } from './config/env.js';
 import { FacebookToolHandlers } from './mcp/handlers.js';
 import { logger } from './utils/logger.js';
 import { TenantIsolationError } from './fb/core/types.js';
+import { DsaComplianceError } from './fb/dsa.js';
+import { PageResolutionError } from './fb/core/page-resolution.js';
 
 const rootEnvPath = path.resolve(process.cwd(), '../../.env');
 if (existsSync(rootEnvPath)) {
@@ -88,19 +90,52 @@ class FacebookMCPServer {
         });
       } catch (error) {
         const isTenantIsolation = error instanceof TenantIsolationError;
+        const isDsaCompliance = error instanceof DsaComplianceError;
+        const isDefaultPageRequired = error instanceof PageResolutionError;
+        const statusCode =
+          isTenantIsolation ? 403 : isDsaCompliance || isDefaultPageRequired ? 422 : 500;
         logger.error('HTTP MCP error', {
           method,
           message: error instanceof Error ? error.message : String(error),
-          status: isTenantIsolation ? 403 : 500,
+          status: statusCode,
         });
 
-        res.status(isTenantIsolation ? 403 : 500).json({
+        res.status(statusCode).json({
           id: requestId || null,
           jsonrpc: '2.0',
           error: {
-            code: isTenantIsolation ? 403 : -32603,
-            message: isTenantIsolation ? 'Forbidden' : 'Internal error',
-            data: error instanceof Error ? error.message : 'Unknown error',
+            code: isTenantIsolation ? 403 : isDsaCompliance || isDefaultPageRequired ? 422 : -32603,
+            message: isTenantIsolation
+              ? 'Forbidden'
+              : isDsaCompliance
+                ? 'DSA_REQUIRED'
+                : isDefaultPageRequired
+                  ? 'DEFAULT_PAGE_REQUIRED'
+                : 'Internal error',
+            data:
+              error instanceof DsaComplianceError
+                ? {
+                    code: error.code,
+                    message: error.message,
+                    nextSteps: error.nextSteps,
+                    partial: false,
+                    success: false,
+                  }
+                : error instanceof PageResolutionError
+                  ? {
+                      code: error.code,
+                      message: error.message,
+                      nextSteps: [
+                        'Open tenant ad account settings.',
+                        'Select and save a default page for this ad account.',
+                        'Retry the campaign workflow.',
+                      ],
+                      partial: false,
+                      success: false,
+                    }
+                : error instanceof Error
+                  ? error.message
+                  : 'Unknown error',
           },
         });
       }

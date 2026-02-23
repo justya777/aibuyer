@@ -1,7 +1,7 @@
 import axios, { type AxiosRequestConfig, type AxiosResponse } from 'axios';
 import type { GraphRetryConfig } from '../../config/env.js';
 import { logger } from '../../utils/logger.js';
-import { normalizeAdAccountId, TenantRegistry } from './tenant-registry.js';
+import { normalizeAdAccountId, normalizePageId, TenantRegistry } from './tenant-registry.js';
 import {
   TenantIsolationError,
 } from './types.js';
@@ -84,6 +84,34 @@ function isRetryableStatus(status: number): boolean {
   return status === 429 || (status >= 500 && status <= 599);
 }
 
+function describeGraphError(status: number, data: unknown): string {
+  if (!data || typeof data !== 'object') {
+    return `Graph request failed with status ${status}`;
+  }
+  const root = data as Record<string, unknown>;
+  const error = (root.error || {}) as Record<string, unknown>;
+  const message = typeof error.message === 'string' ? error.message : undefined;
+  const code = typeof error.code === 'number' ? error.code : undefined;
+  const subcode = typeof error.error_subcode === 'number' ? error.error_subcode : undefined;
+  const errorData = (error.error_data || {}) as Record<string, unknown>;
+  const blameFieldSpecs = Array.isArray(errorData.blame_field_specs)
+    ? errorData.blame_field_specs
+    : undefined;
+  const errorUserTitle =
+    typeof error.error_user_title === 'string' ? error.error_user_title : undefined;
+  const errorUserMsg = typeof error.error_user_msg === 'string' ? error.error_user_msg : undefined;
+  const parts = [`Graph request failed with status ${status}`];
+  if (code != null) parts.push(`code=${code}`);
+  if (subcode != null) parts.push(`subcode=${subcode}`);
+  if (message) parts.push(`message=${message}`);
+  if (blameFieldSpecs && blameFieldSpecs.length > 0) {
+    parts.push(`blame_field_specs=${JSON.stringify(blameFieldSpecs)}`);
+  }
+  if (errorUserTitle) parts.push(`user_title=${errorUserTitle}`);
+  if (errorUserMsg) parts.push(`user_msg=${errorUserMsg}`);
+  return parts.join(' | ');
+}
+
 export class GraphClient {
   private readonly tokenProvider: TokenProvider;
   private readonly apiVersion: string;
@@ -152,7 +180,7 @@ export class GraphClient {
           continue;
         }
 
-        throw new GraphApiError(`Graph request failed with status ${response.status}`, {
+        throw new GraphApiError(describeGraphError(response.status, response.data), {
           status: response.status,
           data: response.data,
           isRetryable: retryable,
@@ -221,11 +249,13 @@ export class GraphClient {
     );
 
     const accountIds = new Set<string>();
+    const pageIds = new Set<string>();
     const campaignIds = new Set<string>();
     const adSetIds = new Set<string>();
     const adIds = new Set<string>();
 
     if (ctx.adAccountId) accountIds.add(normalizeAdAccountId(ctx.adAccountId));
+    if (ctx.pageId) pageIds.add(normalizePageId(ctx.pageId));
     if (ctx.campaignId) campaignIds.add(ctx.campaignId);
     if (ctx.adSetId) adSetIds.add(ctx.adSetId);
     if (ctx.adId) adIds.add(ctx.adId);
@@ -235,8 +265,8 @@ export class GraphClient {
       accountIds.add(normalizeAdAccountId(pathHead));
     }
 
-    this.collectIdsFromUnknown(request.query, accountIds, campaignIds, adSetIds, adIds);
-    this.collectIdsFromUnknown(request.body, accountIds, campaignIds, adSetIds, adIds);
+    this.collectIdsFromUnknown(request.query, accountIds, pageIds, campaignIds, adSetIds, adIds);
+    this.collectIdsFromUnknown(request.body, accountIds, pageIds, campaignIds, adSetIds, adIds);
 
     for (const campaignId of campaignIds) {
       const accountId = await this.resolveAccountIdForResource(ctx, campaignId);
@@ -259,16 +289,32 @@ export class GraphClient {
         Boolean(ctx.isPlatformAdmin)
       );
     }
+    for (const pageId of pageIds) {
+      await this.tenantRegistry.assertPageAllowed(
+        ctx.tenantId,
+        pageId,
+        ctx.userId,
+        Boolean(ctx.isPlatformAdmin)
+      );
+    }
   }
 
   private collectIdsFromUnknown(
     value: unknown,
     accountIds: Set<string>,
+    pageIds: Set<string>,
     campaignIds: Set<string>,
     adSetIds: Set<string>,
     adIds: Set<string>
   ): void {
-    if (!value || typeof value !== 'object') return;
+    if (!value) return;
+    if (Array.isArray(value)) {
+      for (const entry of value) {
+        this.collectIdsFromUnknown(entry, accountIds, pageIds, campaignIds, adSetIds, adIds);
+      }
+      return;
+    }
+    if (typeof value !== 'object') return;
 
     for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
       const normalizedKey = key.toLowerCase();
@@ -298,6 +344,19 @@ export class GraphClient {
 
       if (normalizedKey === 'ad_id' || normalizedKey === 'adid') {
         if (asString) adIds.add(asString);
+      }
+
+      if (
+        normalizedKey === 'pageid' ||
+        normalizedKey === 'page_id' ||
+        normalizedKey === 'defaultpageid' ||
+        normalizedKey === 'default_page_id'
+      ) {
+        if (asString) pageIds.add(normalizePageId(asString));
+      }
+
+      if (raw && typeof raw === 'object') {
+        this.collectIdsFromUnknown(raw, accountIds, pageIds, campaignIds, adSetIds, adIds);
       }
     }
   }

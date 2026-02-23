@@ -5,6 +5,10 @@ function normalizeAdAccountId(adAccountId: string): string {
   return adAccountId.startsWith('act_') ? adAccountId : `act_${adAccountId}`;
 }
 
+function normalizePageId(pageId: string): string {
+  return pageId.trim();
+}
+
 export class TenantRegistry {
   async assertTenantAccessible(
     tenantId: string,
@@ -69,7 +73,7 @@ export class TenantRegistry {
     isPlatformAdmin = false
   ): Promise<string[]> {
     await this.assertTenantAccessible(tenantId, userId, isPlatformAdmin);
-    const assets = await prisma.tenantAsset.findMany({
+    const assets = await prisma.tenantAdAccount.findMany({
       where: { tenantId },
       select: { adAccountId: true },
     });
@@ -84,7 +88,7 @@ export class TenantRegistry {
   ): Promise<boolean> {
     await this.assertTenantAccessible(tenantId, userId, isPlatformAdmin);
     const normalized = normalizeAdAccountId(adAccountId);
-    const asset = await prisma.tenantAsset.findUnique({
+    const asset = await prisma.tenantAdAccount.findUnique({
       where: {
         tenantId_adAccountId: {
           tenantId,
@@ -110,13 +114,60 @@ export class TenantRegistry {
     }
   }
 
+  async isPageAllowed(
+    tenantId: string,
+    pageId: string,
+    userId?: string,
+    isPlatformAdmin = false
+  ): Promise<boolean> {
+    await this.assertTenantAccessible(tenantId, userId, isPlatformAdmin);
+    const normalizedPageId = normalizePageId(pageId);
+    const page = await prisma.tenantPage.findUnique({
+      where: {
+        tenantId_pageId: {
+          tenantId,
+          pageId: normalizedPageId,
+        },
+      },
+      select: { id: true },
+    });
+    return Boolean(page);
+  }
+
+  async assertPageAllowed(
+    tenantId: string,
+    pageId: string,
+    userId?: string,
+    isPlatformAdmin = false
+  ): Promise<void> {
+    const allowed = await this.isPageAllowed(tenantId, pageId, userId, isPlatformAdmin);
+    if (!allowed) {
+      throw new TenantIsolationError(
+        `Tenant ${tenantId} is not allowed to access page ${normalizePageId(pageId)}`
+      );
+    }
+  }
+
+  async getAllowedPageIds(
+    tenantId: string,
+    userId?: string,
+    isPlatformAdmin = false
+  ): Promise<string[]> {
+    await this.assertTenantAccessible(tenantId, userId, isPlatformAdmin);
+    const pages = await prisma.tenantPage.findMany({
+      where: { tenantId },
+      select: { pageId: true },
+    });
+    return pages.map((page) => page.pageId);
+  }
+
   async inferTenantIdByAdAccount(
     adAccountId: string,
     userId?: string,
     isPlatformAdmin = false
   ): Promise<string | undefined> {
     const normalized = normalizeAdAccountId(adAccountId);
-    const matches = await prisma.tenantAsset.findMany({
+    const matches = await prisma.tenantAdAccount.findMany({
       where: isPlatformAdmin
         ? { adAccountId: normalized }
         : {
@@ -141,4 +192,4 @@ export class TenantRegistry {
   }
 }
 
-export { normalizeAdAccountId };
+export { normalizeAdAccountId, normalizePageId };

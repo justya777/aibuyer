@@ -1,5 +1,6 @@
 export class MCPClient {
   private requestId = 1;
+  private static readonly TOOL_TIMEOUT_MS = 90_000;
   private readonly context: {
     tenantId: string;
     userId?: string;
@@ -26,10 +27,14 @@ export class MCPClient {
           };
     
     try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), MCPClient.TOOL_TIMEOUT_MS);
+
       // Make direct HTTP call to our internal MCP server
       const response = await fetch('http://localhost:3001/mcp', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
         body: JSON.stringify({
           jsonrpc: '2.0',
           method: 'tools/call',
@@ -39,13 +44,17 @@ export class MCPClient {
             arguments: resolvedParams
           }
         })
+      }).finally(() => {
+        clearTimeout(timeout);
       });
 
       const result = await response.json().catch(() => null);
 
       if (!response.ok) {
-        const errorMessage =
+        const rawErrorMessage =
           result?.error?.data || result?.error?.message || `HTTP error! status: ${response.status}`;
+        const errorMessage =
+          typeof rawErrorMessage === 'string' ? rawErrorMessage : JSON.stringify(rawErrorMessage);
         throw new Error(errorMessage);
       }
       
@@ -68,6 +77,11 @@ export class MCPClient {
       
       return result.result;
     } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw new Error(
+          `MCP tool "${toolName}" timed out after ${MCPClient.TOOL_TIMEOUT_MS / 1000}s`
+        );
+      }
       throw error;
     }
   }

@@ -23,6 +23,17 @@ enum AuditResult {
   BLOCKED
 }
 
+enum DsaSource {
+  MANUAL
+  RECOMMENDATION
+}
+
+enum TenantPageSource {
+  BUSINESS_OWNED
+  FALLBACK_UNVERIFIED
+  FALLBACK_CONFIRMED
+}
+
 model User {
   id                     String         @id @default(cuid())
   email                  String         @unique
@@ -42,14 +53,33 @@ model User {
 }
 
 model Tenant {
-  id          String         @id @default(cuid())
-  name        String
-  createdAt   DateTime       @default(now())
-  updatedAt   DateTime       @updatedAt
-  members     TenantMember[]
-  assets      TenantAsset[]
-  auditLogs   AuditLog[]
-  activeUsers User[]         @relation("ActiveTenant")
+  id                 String              @id @default(cuid())
+  name               String
+  businessId         String?             @unique
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  members            TenantMember[]
+  businesses         BusinessPortfolio[]
+  assets             TenantAsset[]
+  adAccounts         TenantAdAccount[]
+  pages              TenantPage[]
+  adAccountSettings  AdAccountSettings[]
+  auditLogs          AuditLog[]
+  activeUsers        User[]              @relation("ActiveTenant")
+}
+
+model BusinessPortfolio {
+  id         String   @id @default(cuid())
+  tenantId   String
+  businessId String
+  label      String?
+  lastSyncAt DateTime?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, businessId])
+  @@index([tenantId, createdAt])
 }
 
 model TenantMember {
@@ -92,4 +122,64 @@ model AuditLog {
   @@index([tenantId, timestamp])
   @@index([userId, timestamp])
   @@index([action, timestamp])
+}
+
+model TenantAdAccount {
+  id           String   @id @default(cuid())
+  tenantId     String
+  businessId   String?
+  adAccountId  String
+  name         String?
+  status       String?
+  currency     String?
+  timezoneName String?
+  lastSyncedAt DateTime @default(now())
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, adAccountId])
+  @@index([tenantId, businessId])
+  @@index([adAccountId])
+  @@index([tenantId, lastSyncedAt])
+}
+
+model TenantPage {
+  id         String           @id @default(cuid())
+  tenantId   String
+  businessId String?
+  pageId     String
+  name       String?
+  tasksJson  Json?
+  source     TenantPageSource @default(BUSINESS_OWNED)
+  lastSeenAt DateTime         @default(now())
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
+  tenant     Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, pageId])
+  @@index([tenantId, businessId])
+  @@index([pageId])
+  @@index([tenantId, lastSeenAt])
+  @@index([tenantId, source])
+}
+
+model AdAccountSettings {
+  id             String    @id @default(cuid())
+  tenantId       String
+  businessId     String?
+  adAccountId    String
+  defaultPageId  String?
+  dsaBeneficiary String?
+  dsaPayor       String?
+  dsaSource      DsaSource @default(MANUAL)
+  dsaUpdatedAt   DateTime  @default(now())
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  tenant         Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, adAccountId])
+  @@index([tenantId, businessId])
+  @@index([adAccountId])
+  @@index([tenantId, defaultPageId])
 }

@@ -6,12 +6,9 @@ import type {
   UpdateAdParams,
 } from '../types/facebook.js';
 import { GraphClient } from './core/graph-client.js';
+import { PageResolver } from './core/page-resolution.js';
 import { normalizeAdAccountId } from './core/tenant-registry.js';
 import type { RequestContext } from './core/types.js';
-
-interface AdsApiOptions {
-  defaultPageId?: string;
-}
 
 function mapAdStatus(status: string): 'active' | 'paused' | 'deleted' {
   switch ((status || '').toUpperCase()) {
@@ -50,11 +47,11 @@ function mapAd(record: Record<string, unknown>): FacebookAd {
 
 export class AdsApi {
   private readonly graphClient: GraphClient;
-  private readonly options: AdsApiOptions;
+  private readonly pageResolver: PageResolver;
 
-  constructor(graphClient: GraphClient, options: AdsApiOptions = {}) {
+  constructor(graphClient: GraphClient, pageResolver: PageResolver = new PageResolver()) {
     this.graphClient = graphClient;
-    this.options = options;
+    this.pageResolver = pageResolver;
   }
 
   async getAds(ctx: RequestContext, params: GetAdsParams): Promise<FacebookAd[]> {
@@ -111,7 +108,8 @@ export class AdsApi {
     };
 
     if (params.creative) {
-      payload.creative = this.buildCreative(params);
+      const creativePageId = await this.resolveCreativePageId(ctx, params);
+      payload.creative = this.buildCreative(params, creativePageId);
       if (params.creative.urlParameters) {
         payload.url_tags = params.creative.urlParameters;
       }
@@ -133,11 +131,30 @@ export class AdsApi {
     if (params.name != null) payload.name = params.name;
     if (params.status != null) payload.status = params.status;
     if (params.creative) {
-      payload.creative = this.buildCreative({
-        ...params,
-        accountId: '',
-        adSetId: '',
-      } as CreateAdParams);
+      if (params.creative.linkUrl) {
+        const adAccountId = ctx.adAccountId;
+        if (!adAccountId) {
+          throw new Error('adAccountId is required in context when updating link creatives.');
+        }
+        const creativePageId = await this.resolveCreativePageId(
+          ctx,
+          {
+            ...params,
+            accountId: adAccountId,
+            adSetId: '',
+          } as CreateAdParams
+        );
+        payload.creative = this.buildCreative(
+          {
+            ...params,
+            accountId: adAccountId,
+            adSetId: '',
+          } as CreateAdParams,
+          creativePageId
+        );
+      } else {
+        payload.creative = params.creative;
+      }
     }
 
     await this.graphClient.request(ctx, {
@@ -172,17 +189,25 @@ export class AdsApi {
     return { copiedAdId: response.data.copied_ad_id };
   }
 
-  private buildCreative(params: CreateAdParams): Record<string, unknown> {
+  private async resolveCreativePageId(
+    ctx: RequestContext,
+    params: CreateAdParams
+  ): Promise<string | undefined> {
+    if (!params.creative?.linkUrl) {
+      return undefined;
+    }
+    return this.pageResolver.resolvePageId(ctx, params.accountId, params.creative.pageId);
+  }
+
+  private buildCreative(params: CreateAdParams, pageIdOverride?: string): Record<string, unknown> {
     const creative = params.creative;
     if (!creative.linkUrl) {
       return creative;
     }
 
-    const pageId = this.options.defaultPageId;
+    const pageId = pageIdOverride || creative.pageId;
     if (!pageId) {
-      throw new Error(
-        'FB_PAGE_ID is required to build link creatives. Configure it in the environment.'
-      );
+      throw new Error('Select a default Page for this ad account');
     }
 
     return {

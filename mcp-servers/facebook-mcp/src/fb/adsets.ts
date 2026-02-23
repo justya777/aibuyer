@@ -6,45 +6,11 @@ import type {
   UpdateAdSetParams,
 } from '../types/facebook.js';
 import { GraphClient } from './core/graph-client.js';
+import { PageResolver } from './core/page-resolution.js';
 import { normalizeAdAccountId } from './core/tenant-registry.js';
 import type { RequestContext } from './core/types.js';
+import { DsaService, extractCountryCodesFromTargeting, isEuTargeting } from './dsa.js';
 import { TargetingApi, parseGenderFromInput } from './targeting.js';
-
-interface AdSetsApiOptions {
-  dsaBeneficiary?: string;
-  dsaPayor?: string;
-}
-
-const EU_COUNTRIES = new Set([
-  'RO',
-  'DE',
-  'FR',
-  'IT',
-  'ES',
-  'NL',
-  'BE',
-  'AT',
-  'PL',
-  'SE',
-  'DK',
-  'FI',
-  'NO',
-  'CZ',
-  'HU',
-  'PT',
-  'GR',
-  'IE',
-  'LV',
-  'LT',
-  'EE',
-  'SI',
-  'SK',
-  'HR',
-  'BG',
-  'MT',
-  'LU',
-  'CY',
-]);
 
 function mapAdSetStatus(status: string): 'active' | 'paused' | 'deleted' {
   switch ((status || '').toUpperCase()) {
@@ -57,18 +23,60 @@ function mapAdSetStatus(status: string): 'active' | 'paused' | 'deleted' {
   }
 }
 
+function extractFlexibleSegments(
+  targeting: Record<string, unknown>,
+  field: 'interests' | 'behaviors' | 'custom_audiences'
+): Array<Record<string, unknown>> {
+  const direct = Array.isArray(targeting[field]) ? (targeting[field] as Array<Record<string, unknown>>) : [];
+  const flexibleSpec = Array.isArray(targeting.flexible_spec)
+    ? (targeting.flexible_spec as Array<Record<string, unknown>>)
+    : [];
+  const fromFlexible = flexibleSpec
+    .flatMap((spec) => (Array.isArray(spec[field]) ? (spec[field] as Array<Record<string, unknown>>) : []));
+  return [...direct, ...fromFlexible];
+}
+
 function toNumber(value: unknown): number {
   if (typeof value === 'number') return value;
   if (typeof value === 'string') return Number.parseFloat(value) || 0;
   return 0;
 }
 
+function normalizePromotedObjectInput(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object') return null;
+  const raw = value as Record<string, unknown>;
+  const pageId =
+    typeof raw.pageId === 'string'
+      ? raw.pageId
+      : typeof raw.page_id === 'string'
+        ? raw.page_id
+        : undefined;
+  const pixelId =
+    typeof raw.pixelId === 'string'
+      ? raw.pixelId
+      : typeof raw.pixel_id === 'string'
+        ? raw.pixel_id
+        : undefined;
+  const customEventType =
+    typeof raw.customEventType === 'string'
+      ? raw.customEventType
+      : typeof raw.custom_event_type === 'string'
+        ? raw.custom_event_type
+        : undefined;
+
+  const promotedObject: Record<string, unknown> = {};
+  if (pageId) promotedObject.page_id = pageId;
+  if (pixelId) promotedObject.pixel_id = pixelId;
+  if (customEventType) promotedObject.custom_event_type = customEventType;
+  return Object.keys(promotedObject).length > 0 ? promotedObject : null;
+}
+
 function mapAdSet(record: Record<string, unknown>): FacebookAdSet {
   const targeting = (record.targeting || {}) as Record<string, unknown>;
   const geoLocations = (targeting.geo_locations || {}) as Record<string, unknown>;
-  const interests = Array.isArray(targeting.interests) ? targeting.interests : [];
-  const behaviors = Array.isArray(targeting.behaviors) ? targeting.behaviors : [];
-  const customAudiences = Array.isArray(targeting.custom_audiences) ? targeting.custom_audiences : [];
+  const interests = extractFlexibleSegments(targeting, 'interests');
+  const behaviors = extractFlexibleSegments(targeting, 'behaviors');
+  const customAudiences = extractFlexibleSegments(targeting, 'custom_audiences');
 
   return {
     id: String(record.id || ''),
@@ -134,12 +142,19 @@ function mapAdSet(record: Record<string, unknown>): FacebookAdSet {
 export class AdSetsApi {
   private readonly graphClient: GraphClient;
   private readonly targetingApi: TargetingApi;
-  private readonly options: AdSetsApiOptions;
+  private readonly dsaService: DsaService;
+  private readonly pageResolver: PageResolver;
 
-  constructor(graphClient: GraphClient, targetingApi: TargetingApi, options: AdSetsApiOptions = {}) {
+  constructor(
+    graphClient: GraphClient,
+    targetingApi: TargetingApi,
+    dsaService?: DsaService,
+    pageResolver: PageResolver = new PageResolver()
+  ) {
     this.graphClient = graphClient;
     this.targetingApi = targetingApi;
-    this.options = options;
+    this.dsaService = dsaService || new DsaService(graphClient);
+    this.pageResolver = pageResolver;
   }
 
   async getAdSets(ctx: RequestContext, params: GetAdSetsParams): Promise<FacebookAdSet[]> {
@@ -196,14 +211,45 @@ export class AdSetsApi {
       status: params.status || 'PAUSED',
     };
 
+    let promotedObject = params.promotedObject
+      ? normalizePromotedObjectInput(params.promotedObject)
+      : null;
+    if (this.requiresPromotedPageId(params, promotedObject)) {
+      const explicitPageId =
+        typeof promotedObject?.page_id === 'string' ? String(promotedObject.page_id) : undefined;
+      const resolvedPageId = await this.pageResolver.resolvePageId(ctx, accountId, explicitPageId);
+      promotedObject = {
+        ...(promotedObject || {}),
+        page_id: resolvedPageId,
+      };
+    }
+    if (promotedObject) {
+      payload.promoted_object = promotedObject;
+    }
+
     if (params.dailyBudget != null) payload.daily_budget = params.dailyBudget;
     if (params.lifetimeBudget != null) payload.lifetime_budget = params.lifetimeBudget;
     if (params.bidAmount != null) payload.bid_amount = params.bidAmount;
 
+    // Meta rejects requests that set both campaign-level and ad set-level budgets.
+    // Keep validation at policy layer, but remove ad set budget at Graph layer when campaign budget exists.
+    const campaignBudgetResponse = await this.graphClient.request<Record<string, unknown>>(ctx, {
+      method: 'GET',
+      path: params.campaignId,
+      query: { fields: 'daily_budget,lifetime_budget' },
+    });
+    const hasCampaignBudget =
+      campaignBudgetResponse.data.daily_budget != null ||
+      campaignBudgetResponse.data.lifetime_budget != null;
+    if (hasCampaignBudget) {
+      delete payload.daily_budget;
+      delete payload.lifetime_budget;
+    }
+
     const targeting = await this.targetingApi.buildAdSetTargeting(ctx, params.targeting);
     if (targeting) {
       payload.targeting = targeting;
-      this.attachDsaComplianceIfNeeded(payload, targeting);
+      await this.attachDsaComplianceIfNeeded(ctx, accountId, payload, targeting);
     }
 
     const response = await this.graphClient.request<{ id?: string }>(ctx, {
@@ -276,24 +322,30 @@ export class AdSetsApi {
     return mapAdSet(response.data);
   }
 
-  private attachDsaComplianceIfNeeded(
+  private async attachDsaComplianceIfNeeded(
+    ctx: RequestContext,
+    accountId: string,
     payload: Record<string, unknown>,
     targeting: Record<string, unknown>
-  ): void {
-    const geoLocations = (targeting.geo_locations || {}) as Record<string, unknown>;
-    const countries = Array.isArray(geoLocations.countries)
-      ? geoLocations.countries.map((country) => String(country))
-      : [];
-    const isEuTargeting = countries.some((country) => EU_COUNTRIES.has(country));
-    if (!isEuTargeting) return;
-
-    if (!this.options.dsaBeneficiary || !this.options.dsaPayor) {
-      throw new Error(
-        'DSA compliance fields are required for EU targeting. Configure FB_DSA_BENEFICIARY and FB_DSA_PAYOR.'
-      );
+  ): Promise<void> {
+    const countries = extractCountryCodesFromTargeting(targeting);
+    if (!isEuTargeting(countries)) {
+      return;
     }
 
-    payload.dsa_beneficiary = this.options.dsaBeneficiary;
-    payload.dsa_payor = this.options.dsaPayor;
+    const dsaSettings = await this.dsaService.ensureDsaForAdAccount(ctx, accountId);
+    payload.dsa_beneficiary = dsaSettings.dsaBeneficiary;
+    payload.dsa_payor = dsaSettings.dsaPayor;
+  }
+
+  private requiresPromotedPageId(
+    params: CreateAdSetParams,
+    promotedObject: Record<string, unknown> | null
+  ): boolean {
+    const optimizationGoal = String(params.optimizationGoal || '').toUpperCase();
+    if (optimizationGoal.includes('LEAD')) {
+      return true;
+    }
+    return typeof promotedObject?.page_id === 'string' && Boolean(promotedObject.page_id);
   }
 }

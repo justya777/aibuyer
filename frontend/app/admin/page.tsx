@@ -18,6 +18,22 @@ type AdminTenant = {
     adAccountId: string;
     createdAt: string;
   }>;
+  dsaMappings: Array<{
+    adAccountId: string;
+    dsaBeneficiary: string | null;
+    dsaPayor: string | null;
+    dsaSource: string;
+    dsaUpdatedAt: string;
+  }>;
+  businesses: Array<{
+    businessId: string;
+    label: string | null;
+    lastSyncAt: string | null;
+    counts: {
+      adAccounts: number;
+      pages: number;
+    };
+  }>;
 };
 
 type AuditEntry = {
@@ -109,10 +125,43 @@ export default function AdminPage() {
                       ))}
                     </div>
                     <div className="mt-2 text-sm text-gray-700">
+                      <p className="font-medium">Business Portfolios</p>
+                      {tenant.businesses.length === 0 ? (
+                        <p className="text-gray-500">No BPs configured.</p>
+                      ) : (
+                        tenant.businesses.map((business) => (
+                          <p key={`${tenant.id}-${business.businessId}`}>
+                            {business.label || business.businessId} ({business.businessId}) | last sync:{' '}
+                            {business.lastSyncAt ? new Date(business.lastSyncAt).toLocaleString() : 'never'} |
+                            ad accounts: {business.counts.adAccounts} | pages: {business.counts.pages} |{' '}
+                            <a
+                              href={`/tenants/${tenant.id}/businesses/${encodeURIComponent(business.businessId)}`}
+                              className="text-facebook-600 hover:text-facebook-700"
+                            >
+                              Open BP
+                            </a>
+                          </p>
+                        ))
+                      )}
+                    </div>
+                    <div className="mt-2 text-sm text-gray-700">
                       <p className="font-medium">Ad Accounts</p>
                       {tenant.assets.map((asset) => (
                         <p key={asset.id}>{asset.adAccountId}</p>
                       ))}
+                    </div>
+                    <div className="mt-2 text-sm text-gray-700">
+                      <p className="font-medium">DSA Mappings (Read-only)</p>
+                      {tenant.dsaMappings.length === 0 ? (
+                        <p className="text-gray-500">No DSA rows yet.</p>
+                      ) : (
+                        tenant.dsaMappings.map((mapping) => (
+                          <p key={`${tenant.id}-${mapping.adAccountId}`}>
+                            {mapping.adAccountId}: beneficiary={mapping.dsaBeneficiary || '-'} |
+                            payor={mapping.dsaPayor || '-'} | source={mapping.dsaSource}
+                          </p>
+                        ))
+                      )}
                     </div>
                   </div>
                 ))}

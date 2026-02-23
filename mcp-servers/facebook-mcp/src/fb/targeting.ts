@@ -15,12 +15,59 @@ type AdSetTargetingInput = {
   behaviors?: string[];
   customAudiences?: string[];
   locales?: Array<number | string>;
+  targetingAutomation?: {
+    advantageAudience?: number | boolean;
+  };
 };
 
 interface SearchResult {
   id?: string;
   key?: string;
   name?: string;
+}
+
+const COUNTRY_NAME_TO_CODE: Record<string, string> = {
+  romania: 'RO',
+  poland: 'PL',
+  germany: 'DE',
+  france: 'FR',
+  italy: 'IT',
+  spain: 'ES',
+  netherlands: 'NL',
+  belgium: 'BE',
+  austria: 'AT',
+  sweden: 'SE',
+  denmark: 'DK',
+  finland: 'FI',
+  portugal: 'PT',
+  greece: 'GR',
+  ireland: 'IE',
+  bulgaria: 'BG',
+  croatia: 'HR',
+  hungary: 'HU',
+  slovakia: 'SK',
+  slovenia: 'SI',
+  lithuania: 'LT',
+  latvia: 'LV',
+  estonia: 'EE',
+  luxembourg: 'LU',
+  cyprus: 'CY',
+  malta: 'MT',
+  czechia: 'CZ',
+  'czech republic': 'CZ',
+  norway: 'NO',
+  uk: 'GB',
+  'united kingdom': 'GB',
+  canada: 'CA',
+};
+
+function normalizeCountryCode(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (/^[A-Za-z]{2}$/.test(trimmed)) {
+    return trimmed.toUpperCase();
+  }
+  return COUNTRY_NAME_TO_CODE[trimmed.toLowerCase()] || null;
 }
 
 export function parseGenderFromInput(genders?: number[]): 'all' | 'male' | 'female' {
@@ -47,9 +94,19 @@ export class TargetingApi {
     const targeting: Record<string, unknown> = {};
     if (targetingInput.geoLocations) {
       const geo: Record<string, unknown> = {};
-      if (targetingInput.geoLocations.countries?.length) geo.countries = targetingInput.geoLocations.countries;
-      if (targetingInput.geoLocations.regions?.length) geo.regions = targetingInput.geoLocations.regions;
-      if (targetingInput.geoLocations.cities?.length) geo.cities = targetingInput.geoLocations.cities;
+      if (targetingInput.geoLocations.countries?.length) {
+        const normalizedCountries = targetingInput.geoLocations.countries
+          .map((country) => normalizeCountryCode(country))
+          .filter((country): country is string => Boolean(country));
+        if (normalizedCountries.length > 0) {
+          geo.countries = normalizedCountries;
+        } else {
+          logger.warn('Ignoring unsupported country targeting values', {
+            tenantId: ctx.tenantId,
+          });
+        }
+      }
+      // Regions/cities need structured keys from Graph search; skip raw strings to avoid invalid parameter errors.
       if (Object.keys(geo).length > 0) targeting.geo_locations = geo;
     }
 
@@ -61,10 +118,12 @@ export class TargetingApi {
       if (valid.length > 0) targeting.genders = valid;
     }
 
+    const flexibleSpecClause: Record<string, unknown> = {};
+
     if (targetingInput.interests?.length) {
       const interests = await this.searchInterests(ctx, targetingInput.interests);
       if (interests.length > 0) {
-        targeting.interests = interests.map((interest) => ({
+        flexibleSpecClause.interests = interests.map((interest) => ({
           id: interest.id,
           name: interest.name,
         }));
@@ -72,11 +131,22 @@ export class TargetingApi {
     }
 
     if (targetingInput.behaviors?.length) {
-      targeting.behaviors = targetingInput.behaviors.map((name) => ({ name }));
+      const behaviors = await this.searchBehaviors(ctx, targetingInput.behaviors);
+      if (behaviors.length > 0) {
+        flexibleSpecClause.behaviors = behaviors.map((behavior) => ({
+          id: behavior.id,
+          name: behavior.name,
+        }));
+      }
     }
 
     if (targetingInput.customAudiences?.length) {
-      targeting.custom_audiences = targetingInput.customAudiences.map((id) => ({ id }));
+      flexibleSpecClause.custom_audiences = targetingInput.customAudiences.map((id) => ({ id }));
+    }
+
+    if (Object.keys(flexibleSpecClause).length > 0) {
+      // Meta expects detailed targeting segments (interests/behaviors/custom audiences) in flexible_spec.
+      targeting.flexible_spec = [flexibleSpecClause];
     }
 
     if (targetingInput.locales?.length) {
@@ -84,6 +154,21 @@ export class TargetingApi {
       if (localeIds.length > 0) {
         targeting.locales = localeIds;
       }
+    }
+
+    const rawAdvantageAudience = targetingInput.targetingAutomation?.advantageAudience;
+    if (rawAdvantageAudience != null) {
+      const normalizedAdvantageAudience =
+        typeof rawAdvantageAudience === 'boolean'
+          ? rawAdvantageAudience
+            ? 1
+            : 0
+          : Number(rawAdvantageAudience) === 1
+            ? 1
+            : 0;
+      targeting.targeting_automation = {
+        advantage_audience: normalizedAdvantageAudience,
+      };
     }
 
     if (Object.keys(targeting).length === 0) return undefined;
@@ -113,6 +198,39 @@ export class TargetingApi {
         }
       } catch (error) {
         logger.warn(`Unable to resolve Facebook interest "${name}"`, {
+          tenantId: ctx.tenantId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    return results;
+  }
+
+  private async searchBehaviors(
+    ctx: RequestContext,
+    names: string[]
+  ): Promise<Array<{ id: string; name: string }>> {
+    const results: Array<{ id: string; name: string }> = [];
+
+    for (const name of names) {
+      try {
+        const response = await this.graphClient.request<{ data?: SearchResult[] }>(ctx, {
+          method: 'GET',
+          path: 'search',
+          query: {
+            type: 'adTargetingCategory',
+            class: 'behaviors',
+            q: name,
+            limit: 1,
+          },
+        });
+        const first = response.data.data?.[0];
+        if (first?.id && first?.name) {
+          results.push({ id: first.id, name: first.name });
+        }
+      } catch (error) {
+        logger.warn(`Unable to resolve Facebook behavior "${name}"`, {
           tenantId: ctx.tenantId,
           error: error instanceof Error ? error.message : String(error),
         });

@@ -18,14 +18,12 @@ export interface EnvConfig {
   nodeEnv: string;
   port: number;
   logLevel: string;
-  metaSystemUserToken: string;
+  globalSystemUserToken?: string;
+  tenantSuTokenMapRaw?: string;
   graphApiVersion: string;
   insightsCacheTtlMs: number;
   graphRetry: GraphRetryConfig;
   policy: PolicyConfig;
-  fbDsaBeneficiary?: string;
-  fbDsaPayor?: string;
-  fbPageId?: string;
 }
 
 let cachedConfig: EnvConfig | null = null;
@@ -37,14 +35,53 @@ function parsePositiveInt(raw: string | undefined, fallback: number): number {
   return parsed;
 }
 
+function parseOptionalToken(value: string | undefined): string | undefined {
+  const normalized = value?.trim();
+  return normalized ? normalized : undefined;
+}
+
+function validateTenantTokenMapJson(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error('TENANT_SU_TOKEN_MAP must be valid JSON.');
+  }
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('TENANT_SU_TOKEN_MAP must be a JSON object keyed by tenantId.');
+  }
+
+  for (const [tenantId, token] of Object.entries(parsed as Record<string, unknown>)) {
+    if (!tenantId.trim()) {
+      throw new Error('TENANT_SU_TOKEN_MAP contains an empty tenantId key.');
+    }
+    if (typeof token !== 'string' || !token.trim()) {
+      throw new Error(`TENANT_SU_TOKEN_MAP has an invalid token for tenantId=${tenantId}.`);
+    }
+  }
+
+  return raw;
+}
+
 export function loadEnvConfig(): EnvConfig {
   if (cachedConfig) {
     return cachedConfig;
   }
 
-  const metaSystemUserToken = process.env.META_SYSTEM_USER_TOKEN;
-  if (!metaSystemUserToken || !metaSystemUserToken.trim()) {
-    throw new Error('META_SYSTEM_USER_TOKEN is required.');
+  const globalSystemUserToken = parseOptionalToken(
+    process.env.GLOBAL_SYSTEM_USER_TOKEN ||
+      process.env.GLOBAL_SU_TOKEN ||
+      process.env.META_SYSTEM_USER_TOKEN
+  );
+  const tenantSuTokenMapRaw = validateTenantTokenMapJson(
+    parseOptionalToken(process.env.TENANT_SU_TOKEN_MAP)
+  );
+  if (!globalSystemUserToken && !tenantSuTokenMapRaw) {
+    throw new Error(
+      'Configure at least one token source: TENANT_SU_TOKEN_MAP or GLOBAL_SYSTEM_USER_TOKEN.'
+    );
   }
 
   const policyModeEnv = (process.env.POLICY_ENFORCEMENT_MODE || 'allow_with_warning')
@@ -57,7 +94,8 @@ export function loadEnvConfig(): EnvConfig {
     nodeEnv: process.env.NODE_ENV || 'development',
     port: parsePositiveInt(process.env.PORT, 3001),
     logLevel: process.env.LOG_LEVEL || 'info',
-    metaSystemUserToken: metaSystemUserToken.trim(),
+    globalSystemUserToken,
+    tenantSuTokenMapRaw,
     graphApiVersion: process.env.GRAPH_API_VERSION || 'v23.0',
     insightsCacheTtlMs: parsePositiveInt(process.env.INSIGHTS_CACHE_TTL_MS, 60_000),
     graphRetry: {
@@ -81,9 +119,6 @@ export function loadEnvConfig(): EnvConfig {
         35
       ),
     },
-    fbDsaBeneficiary: process.env.FB_DSA_BENEFICIARY,
-    fbDsaPayor: process.env.FB_DSA_PAYOR,
-    fbPageId: process.env.FB_PAGE_ID,
   };
 
   return cachedConfig;

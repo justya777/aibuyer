@@ -112,6 +112,7 @@ export interface FacebookAd {
   name: string;
   status: 'active' | 'paused' | 'deleted';
   creative: {
+    pageId?: string;
     title?: string;
     body?: string;
     imageUrl?: string;
@@ -171,6 +172,16 @@ export interface GetPagesParams extends TenantScoped {
   fields?: string[];
 }
 
+export interface TenantPageOption {
+  id: string;
+  name: string;
+  canPromote: boolean;
+  source: 'BUSINESS_OWNED' | 'FALLBACK_UNVERIFIED' | 'FALLBACK_CONFIRMED';
+  confirmed: boolean;
+  tasks: string[];
+  lastSeenAt: Date;
+}
+
 export interface GetCampaignsParams extends TenantScoped {
   accountId: string;
   limit?: number;
@@ -184,6 +195,7 @@ export interface CreateCampaignParams extends TenantRequired {
   status?: string;
   dailyBudget?: number;
   lifetimeBudget?: number;
+  adSetTargeting?: CreateAdSetParams['targeting'];
   targeting?: {
     geoLocations?: {
       countries?: string[];
@@ -228,6 +240,11 @@ export interface CreateAdSetParams extends TenantRequired {
   name: string;
   optimizationGoal: string;
   billingEvent: string;
+  promotedObject?: {
+    pageId?: string;
+    pixelId?: string;
+    customEventType?: string;
+  };
   status?: string;
   dailyBudget?: number | null;
   lifetimeBudget?: number | null;
@@ -245,6 +262,9 @@ export interface CreateAdSetParams extends TenantRequired {
     behaviors?: string[];
     customAudiences?: string[];
     locales?: Array<number | string>;
+    targetingAutomation?: {
+      advantageAudience?: number | boolean;
+    };
   };
 }
 
@@ -271,6 +291,7 @@ export interface CreateAdParams extends TenantRequired {
   name: string;
   status?: string;
   creative: {
+    pageId?: string;
     title?: string;
     body?: string;
     imageUrl?: string;
@@ -287,6 +308,7 @@ export interface UpdateAdParams extends TenantRequired {
   name?: string;
   status?: string;
   creative?: {
+    pageId?: string;
     title?: string;
     body?: string;
     imageUrl?: string;
@@ -321,6 +343,24 @@ export interface DuplicateAdOptions extends TenantRequired {
   renamePrefix?: string;
   renameSuffix?: string;
   statusOption?: 'ACTIVE' | 'PAUSED' | 'INHERITED_FROM_SOURCE';
+}
+
+export interface PreflightCreateCampaignBundleParams extends TenantRequired {
+  accountId: string;
+  adSetTargeting?: CreateAdSetParams['targeting'];
+}
+
+export interface AutofillDsaParams extends TenantRequired {
+  adAccountId: string;
+}
+
+export interface SyncTenantAssetsParams extends TenantRequired {}
+
+export interface ListTenantPagesParams extends TenantScoped {}
+
+export interface SetDefaultPageForAdAccountParams extends TenantRequired {
+  adAccountId: string;
+  pageId: string;
 }
 
 export interface FacebookApiError {

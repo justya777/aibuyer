@@ -20,6 +20,7 @@ function getOpenAIClient(): OpenAI {
 const AICommandSchema = z.object({
   command: z.string(),
   accountId: z.string(),
+  businessId: z.string().min(1).optional(),
 });
 
 // Facebook MCP Tools definitions for OpenAI
@@ -106,6 +107,13 @@ const facebookTools = [
           name: { type: 'string', description: 'Ad set name' },
           optimizationGoal: { type: 'string', description: 'Optimization goal (e.g., LEAD_GENERATION)' },
           billingEvent: { type: 'string', description: 'Billing event (IMPRESSIONS)' },
+          promotedObject: {
+            type: 'object',
+            description: 'Optional promoted object fields for adset requirements',
+            properties: {
+              pageId: { type: 'string', description: 'Facebook Page ID when required by objective' }
+            }
+          },
           bidAmount: { type: 'number', description: 'Bid amount in cents' },
           status: { type: 'string', description: 'Ad set status' },
           targeting: {
@@ -126,7 +134,7 @@ const facebookTools = [
             }
           }
         },
-        required: ['accountId', 'campaignId', 'name', 'optimizationGoal', 'billingEvent', 'bidAmount', 'status']
+        required: ['accountId', 'campaignId', 'name', 'optimizationGoal', 'billingEvent', 'status']
       }
     }
   },
@@ -146,6 +154,7 @@ const facebookTools = [
             type: 'object',
             description: 'Ad creative content',
             properties: {
+              pageId: { type: 'string', description: 'Optional explicit Facebook Page ID (tenant-allowed only)' },
               title: { type: 'string', description: 'Ad headline/title' },
               body: { type: 'string', description: 'Ad body text' },
               linkUrl: { type: 'string', description: 'Landing page URL (base URL without query parameters). If user provides full URL with tracking params, this will be auto-extracted.' },
@@ -228,7 +237,7 @@ export async function POST(request: NextRequest) {
     const context = await resolveTenantContext(request);
     const openai = getOpenAIClient();
     const body = await request.json();
-    const { command, accountId } = AICommandSchema.parse(body);
+    const { command, accountId, businessId } = AICommandSchema.parse(body);
 
     const mcpClient = new MCPClient(context);
     const appBaseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
@@ -369,7 +378,7 @@ export async function POST(request: NextRequest) {
       Object.keys(materialAssignments).length > 0 ? materialAssignments : undefined
     );
 
-    const actions = [];
+    const actions: Array<any> = [];
     
     // 🔢 Parse the number of ads requested from the command
     const adsMatch = command.match(/(\d+)\s*ads?/i);
@@ -513,11 +522,52 @@ export async function POST(request: NextRequest) {
 
       if (message.tool_calls) {
         const toolResults = [];
+        const bundledCreateAdSetTool = message.tool_calls.find(
+          (toolCall) => toolCall.function.name === 'create_adset'
+        );
+        const bundledCreateAdSetArgs = bundledCreateAdSetTool
+          ? JSON.parse(bundledCreateAdSetTool.function.arguments)
+          : null;
+        const inferredCountriesFromCommand = inferEuCountriesFromCommand(command);
 
         for (const toolCall of message.tool_calls) {
           try {
             console.log(`🔧 Executing tool: ${toolCall.function.name}`);
             let toolArgs = JSON.parse(toolCall.function.arguments);
+
+            if (toolCall.function.name === 'create_campaign') {
+              const preflightTargeting =
+                bundledCreateAdSetArgs?.targeting ||
+                (inferredCountriesFromCommand.length > 0
+                  ? { geoLocations: { countries: inferredCountriesFromCommand } }
+                  : undefined);
+              try {
+                await mcpClient.callTool('preflight_create_campaign_bundle', {
+                  businessId,
+                  accountId: toolArgs.accountId,
+                  adSetTargeting: preflightTargeting,
+                });
+              } catch (preflightError) {
+                const preflightMessage =
+                  preflightError instanceof Error
+                    ? preflightError.message
+                    : 'DSA preflight failed for campaign bundle.';
+                actions.push({
+                  type: 'campaign_preflight',
+                  tool: 'preflight_create_campaign_bundle',
+                  arguments: {
+                    accountId: toolArgs.accountId,
+                    adSetTargeting: preflightTargeting,
+                  },
+                  error: preflightMessage,
+                  success: false,
+                });
+                blockingError = preflightMessage;
+                conversationComplete = true;
+                break;
+              }
+
+            }
             
             // 🛡️ VALIDATION: Fix campaignId for create_adset if it's empty or placeholder
             if (toolCall.function.name === 'create_adset') {
@@ -565,6 +615,110 @@ export async function POST(request: NextRequest) {
                   console.log('⚠️ create_adset missing budget - applied fallback dailyBudget=1500');
                 }
               }
+
+              const previousAdSetBidError = actions.some(
+                (action) =>
+                  action.tool === 'create_adset' &&
+                  !action.success &&
+                  typeof action.error === 'string' &&
+                  action.error.includes('Bid amount required')
+              );
+              const previousAdSetAdvantageAudienceError = actions.some(
+                (action) =>
+                  action.tool === 'create_adset' &&
+                  !action.success &&
+                  typeof action.error === 'string' &&
+                  action.error.includes('Advantage audience flag required')
+              );
+              if (previousAdSetBidError) {
+                const numericBidAmount =
+                  typeof toolArgs.bidAmount === 'number'
+                    ? toolArgs.bidAmount
+                    : Number(toolArgs.bidAmount);
+                if (!Number.isFinite(numericBidAmount) || numericBidAmount <= 0) {
+                  const numericDailyBudget = Number(toolArgs.dailyBudget ?? 0);
+                  const derivedBidAmount =
+                    Number.isFinite(numericDailyBudget) && numericDailyBudget > 0
+                      ? Math.max(100, Math.floor(numericDailyBudget * 0.2))
+                      : 300;
+                  toolArgs.bidAmount = derivedBidAmount;
+                  console.log(
+                    `⚠️ Previous create_adset failed with bid requirement - applied fallback bidAmount=${derivedBidAmount}`
+                  );
+                }
+              }
+
+              // Normalize advantage audience controls into targeting.targetingAutomation so MCP schema keeps it.
+              if (toolArgs.targeting?.advantage_audience != null) {
+                const normalizedAdvantageAudience =
+                  Number(toolArgs.targeting.advantage_audience) === 1 ? 1 : 0;
+                toolArgs.targeting.targetingAutomation = {
+                  ...(toolArgs.targeting.targetingAutomation || {}),
+                  advantageAudience: normalizedAdvantageAudience,
+                };
+                delete toolArgs.targeting.advantage_audience;
+                console.log(
+                  `⚠️ Normalized targeting.advantage_audience to targeting.targetingAutomation.advantageAudience=${normalizedAdvantageAudience}`
+                );
+              }
+              if (previousAdSetAdvantageAudienceError && !toolArgs.targeting?.targetingAutomation) {
+                toolArgs.targeting = {
+                  ...(toolArgs.targeting || {}),
+                  targetingAutomation: {
+                    advantageAudience: 0,
+                  },
+                };
+                console.log(
+                  '⚠️ Previous create_adset failed with Advantage Audience requirement - applied targetingAutomation.advantageAudience=0'
+                );
+              }
+
+              const campaignAction = actions.find(a => a.tool === 'create_campaign' && a.success);
+              const campaignObjective = campaignAction?.result?.objective;
+              const isLeadsObjective = campaignObjective === 'OUTCOME_LEADS';
+              if (isLeadsObjective) {
+                // Keep an objective-safe optimization goal for leads.
+                if (
+                  !toolArgs.optimizationGoal ||
+                  toolArgs.optimizationGoal === 'LEADS' ||
+                  toolArgs.optimizationGoal === 'LEAD_GENERATION'
+                ) {
+                  toolArgs.optimizationGoal = 'LEAD_GENERATION';
+                  console.log('⚠️ Applied optimizationGoal=LEAD_GENERATION for OUTCOME_LEADS campaign');
+                }
+                if (!toolArgs.billingEvent) {
+                  toolArgs.billingEvent = 'IMPRESSIONS';
+                  console.log('⚠️ Applied default billingEvent=IMPRESSIONS for OUTCOME_LEADS campaign');
+                }
+
+                // Page resolution is handled by backend tenant defaults / resolver.
+              }
+
+              // Meta frequently rejects locale targeting passed as short strings.
+              // Keep this flow resilient: remove locales from AI adset payload.
+              if (toolArgs.targeting?.locales) {
+                delete toolArgs.targeting.locales;
+                console.log('⚠️ Removed targeting.locales to avoid invalid locale parameter errors');
+              }
+
+              console.log(
+                'ℹ️ create_adset sanitized payload',
+                JSON.stringify(
+                  {
+                    accountId: toolArgs.accountId,
+                    campaignId: toolArgs.campaignId,
+                    optimizationGoal: toolArgs.optimizationGoal,
+                    billingEvent: toolArgs.billingEvent,
+                    dailyBudget: toolArgs.dailyBudget,
+                    lifetimeBudget: toolArgs.lifetimeBudget,
+                    bidAmount: toolArgs.bidAmount,
+                    targeting: toolArgs.targeting,
+                    promotedObject: toolArgs.promotedObject,
+                  },
+                  null,
+                  2
+                )
+              );
             }
             
             // 🛡️ VALIDATION: Fix adSetId for create_ad if it's empty or placeholder
@@ -813,7 +967,10 @@ export async function POST(request: NextRequest) {
             }
             
             // Execute the tool call via MCP client
-            const result = await mcpClient.callTool(toolCall.function.name, toolArgs);
+            const result = await mcpClient.callTool(toolCall.function.name, {
+              ...toolArgs,
+              businessId,
+            });
             toolFailureCounts[toolCall.function.name] = 0;
             
             // Store campaign ID for subsequent adset creation
@@ -862,10 +1019,14 @@ export async function POST(request: NextRequest) {
               content: `Error: ${errorMessage}`
             });
 
-            if (errorMessage.includes('DSA compliance fields are required')) {
+            if (
+              errorMessage.includes('DSA_REQUIRED') ||
+              errorMessage.includes('Set DSA payor/beneficiary') ||
+              errorMessage.includes('Select a default Page for this ad account')
+            ) {
               blockingError =
-                'Meta DSA compliance fields are missing for EU targeting. Set FB_DSA_BENEFICIARY and FB_DSA_PAYOR in .env, restart the MCP server, then retry.';
-              console.log('🛑 Blocking DSA configuration error encountered. Stopping loop.');
+                errorMessage;
+              console.log('🛑 Blocking configuration error encountered. Stopping loop.');
               conversationComplete = true;
             }
 
@@ -1006,17 +1167,16 @@ export async function POST(request: NextRequest) {
     }
 
     if (blockingError) {
+      const normalizedBlockingError = normalizeBlockingError(blockingError);
       return NextResponse.json(
         {
+          ...normalizedBlockingError,
           success: false,
-          partial: campaignsCreated > 0,
+          partial: false,
           actions,
           reasoning: typeof reasoning === 'string' ? reasoning : 'Command blocked by configuration',
-          error: blockingError,
-          message:
-            campaignsCreated > 0
-              ? `Campaign was created, but downstream steps were blocked. ${blockingError}`
-              : blockingError,
+          error: normalizedBlockingError.message,
+          message: normalizedBlockingError.message,
         },
         { status: 422 }
       );
@@ -1062,4 +1222,92 @@ function getActionType(toolName: string): string {
     case 'duplicate_ad': return 'ad_duplicate';
     default: return 'unknown';
   }
+}
+
+function inferEuCountriesFromCommand(command: string): string[] {
+  const normalized = command.toLowerCase();
+  const countryMap: Record<string, string> = {
+    romania: 'RO',
+    poland: 'PL',
+    germany: 'DE',
+    france: 'FR',
+    italy: 'IT',
+    spain: 'ES',
+    netherlands: 'NL',
+    belgium: 'BE',
+    austria: 'AT',
+    sweden: 'SE',
+    denmark: 'DK',
+    finland: 'FI',
+    czechia: 'CZ',
+    'czech republic': 'CZ',
+    hungary: 'HU',
+    portugal: 'PT',
+    greece: 'GR',
+    ireland: 'IE',
+    slovakia: 'SK',
+    slovenia: 'SI',
+    croatia: 'HR',
+    bulgaria: 'BG',
+    lithuania: 'LT',
+    latvia: 'LV',
+    estonia: 'EE',
+    luxembourg: 'LU',
+    cyprus: 'CY',
+    malta: 'MT',
+    norway: 'NO',
+  };
+  const countries = new Set<string>();
+  for (const [keyword, code] of Object.entries(countryMap)) {
+    if (normalized.includes(keyword)) {
+      countries.add(code);
+    }
+  }
+  return Array.from(countries);
+}
+
+function normalizeBlockingError(errorMessage: string): {
+  code: 'DSA_REQUIRED' | 'DEFAULT_PAGE_REQUIRED';
+  message: string;
+  nextSteps: string[];
+} {
+  if (
+    errorMessage.includes('Select a default Page for this ad account') ||
+    errorMessage.includes('Cannot create lead ad set: no promotable page found') ||
+    errorMessage.includes('Cannot create leads campaign bundle: no promotable page found')
+  ) {
+    return {
+      code: 'DEFAULT_PAGE_REQUIRED',
+      message: errorMessage,
+      nextSteps: [
+        'Open Tenant Ad Account Settings.',
+        'Select a default Facebook Page for this ad account.',
+        'Retry the campaign creation request after saving.',
+      ],
+    };
+  }
+
+  try {
+    const parsed = JSON.parse(errorMessage) as { code?: string; message?: string; nextSteps?: string[] };
+    if (parsed && parsed.code === 'DSA_REQUIRED' && parsed.message) {
+      return {
+        code: 'DSA_REQUIRED',
+        message: parsed.message,
+        nextSteps: Array.isArray(parsed.nextSteps) ? parsed.nextSteps : [],
+      };
+    }
+  } catch {
+    // Fall through.
+  }
+
+  return {
+    code: 'DSA_REQUIRED',
+    message:
+      errorMessage || 'DSA requirements are missing for EU targeting. Set DSA payor/beneficiary in tenant settings.',
+    nextSteps: [
+      'Open Tenant Settings > DSA.',
+      'Autofill from Meta recommendations or set values manually.',
+      'Retry the campaign creation request.',
+    ],
+  };
 }
