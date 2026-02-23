@@ -30,6 +30,8 @@ type SyncTenantAssetsResult = {
   fallbackPagesUsed: boolean;
   pagesSynced: number;
   adAccountsSynced: number;
+  pagesDiscoveryStrategy: 'owned_pages' | 'client_pages' | 'me_accounts_filtered' | 'none';
+  adAccountsDiscoveryStrategy: 'owned_ad_accounts' | 'client_ad_accounts' | 'me_adaccounts_filtered' | 'none';
   autoAssignedDefaultPageId: string | null;
 };
 
@@ -66,6 +68,200 @@ export class AccountsApi {
 
   constructor(graphClient: GraphClient) {
     this.graphClient = graphClient;
+  }
+
+  private mapBusinessPages(
+    pages: Array<Record<string, unknown>>,
+    source: TenantPageSource
+  ): Array<{
+    pageId: string;
+    name: string;
+    tasksJson: string[];
+    source: TenantPageSource;
+  }> {
+    return pages
+      .filter((page) => page.id)
+      .map((page) => ({
+        pageId: String(page.id),
+        name: String(page.name || page.id),
+        tasksJson: [],
+        source,
+      }));
+  }
+
+  private mapFallbackPages(
+    pages: Array<Record<string, unknown>>
+  ): Array<{
+    pageId: string;
+    name: string;
+    tasksJson: string[];
+    source: TenantPageSource;
+  }> {
+    return pages
+      .filter((page) => page.id)
+      .map((page) => {
+        const tasks = parseArrayOfStrings(page.tasks);
+        const perms = parseArrayOfStrings(page.perms);
+        return {
+          pageId: String(page.id),
+          name: String(page.name || page.id),
+          tasksJson: tasks.length > 0 ? tasks : perms,
+          source: TenantPageSource.FALLBACK_UNVERIFIED,
+        };
+      });
+  }
+
+  private mapAssignedPages(
+    pages: Array<Record<string, unknown>>
+  ): Array<{
+    pageId: string;
+    name: string;
+    tasksJson: string[];
+    source: TenantPageSource;
+  }> {
+    return pages
+      .filter((page) => page.id)
+      .map((page) => {
+        const permittedTasks = parseArrayOfStrings(page.permitted_tasks);
+        const tasks = parseArrayOfStrings(page.tasks);
+        return {
+          pageId: String(page.id),
+          name: String(page.name || page.id),
+          tasksJson: permittedTasks.length > 0 ? permittedTasks : tasks,
+          source: TenantPageSource.FALLBACK_UNVERIFIED,
+        };
+      });
+  }
+
+  private mapAdAccounts(
+    accounts: Array<Record<string, unknown>>
+  ): Array<{
+    adAccountId: string;
+    name: string;
+    status: string;
+    currency: string;
+    timezoneName: string;
+  }> {
+    return accounts
+      .filter((account) => account.id)
+      .map((account) => ({
+        adAccountId: normalizeAdAccountId(String(account.id)),
+        name: String(account.name || account.id),
+        status: String(account.account_status || ''),
+        currency: String(account.currency || ''),
+        timezoneName: String(account.timezone_name || ''),
+      }));
+  }
+
+  private extractBusinessIds(value: unknown): string[] {
+    if (!value || typeof value !== 'object') return [];
+    const record = value as Record<string, unknown>;
+    const values: string[] = [];
+
+    const pushBusinessId = (entry: unknown): void => {
+      if (typeof entry === 'string') {
+        const value = entry.trim();
+        if (value) values.push(value);
+        return;
+      }
+      if (entry && typeof entry === 'object') {
+        const id = String((entry as Record<string, unknown>).id || '').trim();
+        if (id) values.push(id);
+      }
+    };
+
+    pushBusinessId(record.business);
+    pushBusinessId(record.owned_business);
+    pushBusinessId(record.owner_business);
+
+    return Array.from(new Set(values));
+  }
+
+  private async filterFallbackPagesByBusiness(
+    ctx: RequestContext,
+    pages: Array<{
+      pageId: string;
+      name: string;
+      tasksJson: string[];
+      source: TenantPageSource;
+    }>,
+    businessId: string
+  ): Promise<
+    Array<{
+      pageId: string;
+      name: string;
+      tasksJson: string[];
+      source: TenantPageSource;
+    }>
+  > {
+    const pageRows: Array<{
+      pageId: string;
+      name: string;
+      tasksJson: string[];
+      source: TenantPageSource;
+    }> = [];
+    const concurrency = 8;
+
+    for (let index = 0; index < pages.length; index += concurrency) {
+      const batch = pages.slice(index, index + concurrency);
+      const batchResult = await Promise.all(
+        batch.map(async (page) => {
+          try {
+            const response = await this.graphClient.request<Record<string, unknown>>(ctx, {
+              method: 'GET',
+              path: page.pageId,
+              query: { fields: 'business{id},owned_business{id},owner_business{id}' },
+            });
+            const resolvedBusinessIds = this.extractBusinessIds(response.data);
+            if (resolvedBusinessIds.includes(businessId)) {
+              return page;
+            }
+
+            // For partner-shared pages, owner business may differ; check agency linkage.
+            const agenciesResponse = await this.graphClient.request<{
+              data?: Array<Record<string, unknown>>;
+            }>(ctx, {
+              method: 'GET',
+              path: `${page.pageId}/agencies`,
+              query: { fields: 'id', limit: 200 },
+            });
+            const agencies = agenciesResponse.data.data || [];
+            const hasMatchingAgency = agencies.some(
+              (agency) => String(agency.id || '').trim() === businessId
+            );
+            if (hasMatchingAgency) {
+              return page;
+            }
+
+            // Final page-level check: if business has assigned users on this page, treat as scoped.
+            const assignedUsersResponse = await this.graphClient.request<{
+              data?: Array<Record<string, unknown>>;
+            }>(ctx, {
+              method: 'GET',
+              path: `${page.pageId}/assigned_users`,
+              query: { business: businessId, fields: 'id', limit: 1 },
+            });
+            const assignedUsers = assignedUsersResponse.data.data || [];
+            return assignedUsers.length > 0 ? page : null;
+          } catch (error) {
+            logger.warn('Failed to resolve page business during fallback filtering', {
+              tenantId: ctx.tenantId,
+              businessId,
+              pageId: page.pageId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+            return null;
+          }
+        })
+      );
+      for (const candidate of batchResult) {
+        if (candidate) {
+          pageRows.push(candidate);
+        }
+      }
+    }
+
+    return pageRows;
   }
 
   async getAccounts(
@@ -154,12 +350,12 @@ export class AccountsApi {
     }));
   }
 
-  async syncTenantAssets(ctx: RequestContext): Promise<SyncTenantAssetsResult> {
+  async syncTenantAssets(ctx: RequestContext, businessIdOverride?: string): Promise<SyncTenantAssetsResult> {
     const tenant = await prisma.tenant.findUnique({
       where: { id: ctx.tenantId },
       select: { businessId: true },
     });
-    const businessId = tenant?.businessId?.trim();
+    const businessId = businessIdOverride?.trim() || tenant?.businessId?.trim();
     if (!businessId) {
       throw new Error(
         `Tenant ${ctx.tenantId} does not have a businessId configured. Set tenant.businessId before sync.`
@@ -167,51 +363,93 @@ export class AccountsApi {
     }
 
     let fallbackPagesUsed = false;
+    let pagesDiscoveryStrategy: SyncTenantAssetsResult['pagesDiscoveryStrategy'] = 'none';
+    let adAccountsDiscoveryStrategy: SyncTenantAssetsResult['adAccountsDiscoveryStrategy'] = 'none';
     let pageRows: Array<{
       pageId: string;
       name: string;
       tasksJson: string[];
       source: TenantPageSource;
     }> = [];
-
     try {
       const response = await this.graphClient.request<{ data?: Array<Record<string, unknown>> }>(ctx, {
         method: 'GET',
         path: `${businessId}/owned_pages`,
         query: { fields: 'id,name', limit: 200 },
       });
-      pageRows = (response.data.data || [])
-        .filter((page) => page.id)
-        .map((page) => ({
-          pageId: String(page.id),
-          name: String(page.name || page.id),
-          tasksJson: [],
-          source: TenantPageSource.BUSINESS_OWNED,
-        }));
+      pageRows = this.mapBusinessPages(response.data.data || [], TenantPageSource.BUSINESS_OWNED);
+      if (pageRows.length > 0) {
+        pagesDiscoveryStrategy = 'owned_pages';
+      }
     } catch (ownedPagesError) {
-      fallbackPagesUsed = true;
-      logger.warn('Owned pages lookup failed, using /me/accounts fallback', {
+      logger.warn('owned_pages lookup failed', {
         tenantId: ctx.tenantId,
         businessId,
         error: ownedPagesError instanceof Error ? ownedPagesError.message : String(ownedPagesError),
       });
-      const fallback = await this.graphClient.request<{ data?: Array<Record<string, unknown>> }>(ctx, {
-        method: 'GET',
-        path: 'me/accounts',
-        query: { fields: 'id,name,tasks,perms', limit: 200 },
-      });
-      pageRows = (fallback.data.data || [])
-        .filter((page) => page.id)
-        .map((page) => {
-          const tasks = parseArrayOfStrings(page.tasks);
-          const perms = parseArrayOfStrings(page.perms);
-          return {
-            pageId: String(page.id),
-            name: String(page.name || page.id),
-            tasksJson: tasks.length > 0 ? tasks : perms,
-            source: TenantPageSource.FALLBACK_UNVERIFIED,
-          };
+    }
+
+    if (pageRows.length === 0) {
+      try {
+        const response = await this.graphClient.request<{ data?: Array<Record<string, unknown>> }>(ctx, {
+          method: 'GET',
+          path: `${businessId}/client_pages`,
+          query: { fields: 'id,name', limit: 200 },
         });
+        pageRows = this.mapBusinessPages(response.data.data || [], TenantPageSource.BUSINESS_OWNED);
+        if (pageRows.length > 0) {
+          pagesDiscoveryStrategy = 'client_pages';
+        }
+      } catch (clientPagesError) {
+        logger.warn('client_pages lookup failed', {
+          tenantId: ctx.tenantId,
+          businessId,
+          error: clientPagesError instanceof Error ? clientPagesError.message : String(clientPagesError),
+        });
+      }
+    }
+
+    if (pageRows.length === 0) {
+      fallbackPagesUsed = true;
+      try {
+        const fallback = await this.graphClient.request<{ data?: Array<Record<string, unknown>> }>(ctx, {
+          method: 'GET',
+          path: 'me/accounts',
+          query: { fields: 'id,name,tasks,perms', limit: 200 },
+        });
+        const candidatePages = this.mapFallbackPages(fallback.data.data || []);
+        pageRows = await this.filterFallbackPagesByBusiness(ctx, candidatePages, businessId);
+        if (pageRows.length > 0) {
+          pagesDiscoveryStrategy = 'me_accounts_filtered';
+        }
+      } catch (fallbackPagesError) {
+        logger.warn('me/accounts fallback lookup failed', {
+          tenantId: ctx.tenantId,
+          businessId,
+          error: fallbackPagesError instanceof Error ? fallbackPagesError.message : String(fallbackPagesError),
+        });
+      }
+    }
+
+    if (pageRows.length === 0) {
+      fallbackPagesUsed = true;
+      try {
+        const assignedPages = await this.graphClient.request<{ data?: Array<Record<string, unknown>> }>(ctx, {
+          method: 'GET',
+          path: 'me/assigned_pages',
+          query: { business: businessId, fields: 'id,name,permitted_tasks,tasks', limit: 200 },
+        });
+        pageRows = this.mapAssignedPages(assignedPages.data.data || []);
+        if (pageRows.length > 0) {
+          pagesDiscoveryStrategy = 'me_accounts_filtered';
+        }
+      } catch (assignedPagesError) {
+        logger.warn('me/assigned_pages fallback lookup failed', {
+          tenantId: ctx.tenantId,
+          businessId,
+          error: assignedPagesError instanceof Error ? assignedPagesError.message : String(assignedPagesError),
+        });
+      }
     }
 
     let adAccountRows: Array<{
@@ -230,17 +468,12 @@ export class AccountsApi {
           limit: 200,
         },
       });
-      adAccountRows = (response.data.data || [])
-        .filter((account) => account.id)
-        .map((account) => ({
-          adAccountId: normalizeAdAccountId(String(account.id)),
-          name: String(account.name || account.id),
-          status: String(account.account_status || ''),
-          currency: String(account.currency || ''),
-          timezoneName: String(account.timezone_name || ''),
-        }));
+      adAccountRows = this.mapAdAccounts(response.data.data || []);
+      if (adAccountRows.length > 0) {
+        adAccountsDiscoveryStrategy = 'owned_ad_accounts';
+      }
     } catch (ownedAdAccountsError) {
-      logger.warn('owned_ad_accounts lookup failed, trying client_ad_accounts', {
+      logger.warn('owned_ad_accounts lookup failed', {
         tenantId: ctx.tenantId,
         businessId,
         error:
@@ -248,24 +481,73 @@ export class AccountsApi {
             ? ownedAdAccountsError.message
             : String(ownedAdAccountsError),
       });
-      const fallback = await this.graphClient.request<{ data?: Array<Record<string, unknown>> }>(ctx, {
-        method: 'GET',
-        path: `${businessId}/client_ad_accounts`,
-        query: {
-          fields: 'id,name,account_status,currency,timezone_name',
-          limit: 200,
-        },
-      });
-      adAccountRows = (fallback.data.data || [])
-        .filter((account) => account.id)
-        .map((account) => ({
-          adAccountId: normalizeAdAccountId(String(account.id)),
-          name: String(account.name || account.id),
-          status: String(account.account_status || ''),
-          currency: String(account.currency || ''),
-          timezoneName: String(account.timezone_name || ''),
-        }));
     }
+
+    if (adAccountRows.length === 0) {
+      try {
+        const fallback = await this.graphClient.request<{ data?: Array<Record<string, unknown>> }>(ctx, {
+          method: 'GET',
+          path: `${businessId}/client_ad_accounts`,
+          query: {
+            fields: 'id,name,account_status,currency,timezone_name',
+            limit: 200,
+          },
+        });
+        adAccountRows = this.mapAdAccounts(fallback.data.data || []);
+        if (adAccountRows.length > 0) {
+          adAccountsDiscoveryStrategy = 'client_ad_accounts';
+        }
+      } catch (clientAdAccountsError) {
+        logger.warn('client_ad_accounts lookup failed', {
+          tenantId: ctx.tenantId,
+          businessId,
+          error:
+            clientAdAccountsError instanceof Error
+              ? clientAdAccountsError.message
+              : String(clientAdAccountsError),
+        });
+      }
+    }
+
+    if (adAccountRows.length === 0) {
+      try {
+        const fallback = await this.graphClient.request<{ data?: Array<Record<string, unknown>> }>(ctx, {
+          method: 'GET',
+          path: 'me/adaccounts',
+          query: {
+            fields: 'id,name,account_status,currency,timezone_name,business{id}',
+            limit: 200,
+          },
+        });
+        adAccountRows = this.mapAdAccounts(
+          (fallback.data.data || []).filter(
+            (account) => this.extractBusinessIds(account).includes(businessId)
+          )
+        );
+        if (adAccountRows.length > 0) {
+          adAccountsDiscoveryStrategy = 'me_adaccounts_filtered';
+        }
+      } catch (fallbackAdAccountsError) {
+        logger.warn('me/adaccounts fallback lookup failed', {
+          tenantId: ctx.tenantId,
+          businessId,
+          error:
+            fallbackAdAccountsError instanceof Error
+              ? fallbackAdAccountsError.message
+              : String(fallbackAdAccountsError),
+        });
+      }
+    }
+
+    logger.info('Tenant asset sync discovery summary', {
+      tenantId: ctx.tenantId,
+      businessId,
+      pagesDiscoveryStrategy,
+      adAccountsDiscoveryStrategy,
+      fallbackPagesUsed,
+      pagesSynced: pageRows.length,
+      adAccountsSynced: adAccountRows.length,
+    });
 
     const now = new Date();
     const existingPageSources = await prisma.tenantPage.findMany({
@@ -364,6 +646,8 @@ export class AccountsApi {
       fallbackPagesUsed,
       pagesSynced: pageRows.length,
       adAccountsSynced: adAccountRows.length,
+      pagesDiscoveryStrategy,
+      adAccountsDiscoveryStrategy,
       autoAssignedDefaultPageId,
     };
   }

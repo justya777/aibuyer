@@ -30,6 +30,7 @@ export const GetPromotablePagesSchema = z.object({
 export const SyncTenantAssetsSchema = z.object({
   tenantId: tenantIdRequired,
   ...actorFields,
+  businessId: z.string().optional(),
 });
 
 export const ListTenantPagesSchema = z.object({
@@ -360,6 +361,10 @@ export const tools: Tool[] = [
       type: 'object',
       properties: {
         tenantId: { type: 'string', description: 'Tenant ID for authorization and isolation checks' },
+        businessId: {
+          type: 'string',
+          description: 'Optional Business Manager ID to sync against (defaults to tenant.businessId)',
+        },
       },
       required: ['tenantId'],
     },

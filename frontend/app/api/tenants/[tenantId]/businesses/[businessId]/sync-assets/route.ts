@@ -51,32 +51,14 @@ export async function POST(
       );
     }
 
-    const tenantBefore = await db.tenant.findUnique({
-      where: { id: tenantId },
-      select: { businessId: true },
-    });
     const startedAt = new Date();
-
-    // MCP sync currently anchors on tenant.businessId, so we set selected BP for this sync run.
-    await db.tenant.update({
-      where: { id: tenantId },
-      data: { businessId },
-    });
 
     const mcpClient = new MCPClient({
       tenantId,
       userId: context.userId,
       isPlatformAdmin: context.isPlatformAdmin,
     });
-    let result: unknown;
-    try {
-      result = await mcpClient.callTool('sync_tenant_assets', { businessId });
-    } finally {
-      await db.tenant.update({
-        where: { id: tenantId },
-        data: { businessId: tenantBefore?.businessId ?? businessId },
-      });
-    }
+    const result = await mcpClient.callTool('sync_tenant_assets', { businessId });
 
     // Persist BP context on newly synced rows so tenant can keep multiple BP snapshots.
     await db.$transaction(async (tx) => {

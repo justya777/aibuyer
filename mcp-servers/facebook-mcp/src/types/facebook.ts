@@ -354,7 +354,9 @@ export interface AutofillDsaParams extends TenantRequired {
   adAccountId: string;
 }
 
-export interface SyncTenantAssetsParams extends TenantRequired {}
+export interface SyncTenantAssetsParams extends TenantRequired {
+  businessId?: string;
+}
 
 export interface ListTenantPagesParams extends TenantScoped {}
 

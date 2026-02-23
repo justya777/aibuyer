@@ -143,10 +143,16 @@ export class FacebookServiceFacade {
     fallbackPagesUsed: boolean;
     pagesSynced: number;
     adAccountsSynced: number;
+    pagesDiscoveryStrategy: 'owned_pages' | 'client_pages' | 'me_accounts_filtered' | 'none';
+    adAccountsDiscoveryStrategy:
+      | 'owned_ad_accounts'
+      | 'client_ad_accounts'
+      | 'me_adaccounts_filtered'
+      | 'none';
     autoAssignedDefaultPageId: string | null;
   }> {
     const actor = await this.requireActor(params, 'sync_tenant_assets');
-    return this.accountsApi.syncTenantAssets(this.buildContext(actor));
+    return this.accountsApi.syncTenantAssets(this.buildContext(actor), params.businessId);
   }
 
   async setDefaultPageForAdAccount(
