@@ -9,7 +9,7 @@ import { GraphClient } from './core/graph-client.js';
 import { PageResolver } from './core/page-resolution.js';
 import { normalizeAdAccountId } from './core/tenant-registry.js';
 import type { RequestContext } from './core/types.js';
-import { DsaService, extractCountryCodesFromTargeting, isEuTargeting } from './dsa.js';
+import { attachDsaPayloadForEuTargeting, DsaService } from './dsa.js';
 import { TargetingApi, parseGenderFromInput } from './targeting.js';
 
 function mapAdSetStatus(status: string): 'active' | 'paused' | 'deleted' {
@@ -328,14 +328,7 @@ export class AdSetsApi {
     payload: Record<string, unknown>,
     targeting: Record<string, unknown>
   ): Promise<void> {
-    const countries = extractCountryCodesFromTargeting(targeting);
-    if (!isEuTargeting(countries)) {
-      return;
-    }
-
-    const dsaSettings = await this.dsaService.ensureDsaForAdAccount(ctx, accountId);
-    payload.dsa_beneficiary = dsaSettings.dsaBeneficiary;
-    payload.dsa_payor = dsaSettings.dsaPayor;
+    await attachDsaPayloadForEuTargeting(this.dsaService, ctx, accountId, targeting, payload);
   }
 
   private requiresPromotedPageId(

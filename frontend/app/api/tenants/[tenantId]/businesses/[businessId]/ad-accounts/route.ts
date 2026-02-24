@@ -75,6 +75,8 @@ export async function GET(
           dsaPayor: adAccountSettings?.dsaPayor || null,
           dsaSource: adAccountSettings?.dsaSource || null,
           dsaUpdatedAt: adAccountSettings?.dsaUpdatedAt || null,
+          dsaConfigured: Boolean(adAccountSettings?.dsaBeneficiary && adAccountSettings?.dsaPayor),
+          dsaStatus: adAccountSettings?.dsaBeneficiary && adAccountSettings?.dsaPayor ? 'CONFIGURED' : 'MISSING',
         };
       }),
     });

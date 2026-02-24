@@ -354,6 +354,17 @@ export interface AutofillDsaParams extends TenantRequired {
   adAccountId: string;
 }
 
+export interface GetDsaSettingsParams extends TenantRequired {
+  adAccountId: string;
+}
+
+export interface SetDsaSettingsParams extends TenantRequired {
+  adAccountId: string;
+  dsaBeneficiary: string;
+  dsaPayor: string;
+  businessId?: string;
+}
+
 export interface SyncTenantAssetsParams extends TenantRequired {
   businessId?: string;
 }

@@ -40,11 +40,13 @@ export default function BusinessAdAccountDetailPage() {
     if (!tenantId || !businessId || !actId) return;
     setIsLoading(true);
     setError(null);
+    setCampaigns([]);
     try {
       const adAccountsResponse = await fetch(
         `/api/tenants/${tenantId}/businesses/${encodeURIComponent(businessId)}/ad-accounts`,
         {
           headers: { 'x-tenant-id': tenantId },
+          cache: 'no-store',
         }
       );
       const adAccountsPayload = await adAccountsResponse.json();
@@ -60,12 +62,20 @@ export default function BusinessAdAccountDetailPage() {
         null;
       setAdAccount(selected);
 
-      const campaignResponse = await fetch(`/api/facebook/campaigns?accountId=${encodeURIComponent(actId)}`, {
-        headers: { 'x-tenant-id': tenantId },
-      });
+      const campaignResponse = await fetch(
+        `/api/facebook/campaigns?accountId=${encodeURIComponent(actId)}`,
+        {
+          headers: { 'x-tenant-id': tenantId },
+          cache: 'no-store',
+        }
+      );
       const campaignPayload = await campaignResponse.json();
+      if (!campaignResponse.ok) {
+        throw new Error(campaignPayload.error || 'Failed to load campaigns from Facebook.');
+      }
       setCampaigns(Array.isArray(campaignPayload.campaigns) ? campaignPayload.campaigns : []);
     } catch (loadError) {
+      setCampaigns([]);
       setError(loadError instanceof Error ? loadError.message : 'Failed to load ad account detail.');
     } finally {
       setIsLoading(false);
@@ -191,6 +201,11 @@ export default function BusinessAdAccountDetailPage() {
                 requiresDefaultPage={!adAccount.defaultPageId}
                 onNavigateToDefaultPage={() => {
                   window.location.href = `/tenants/${tenantId}/businesses/${encodeURIComponent(businessId)}`;
+                }}
+                onNavigateToDsaSettings={(adAccountId) => {
+                  window.location.href = `/tenants/${tenantId}/businesses/${encodeURIComponent(
+                    businessId
+                  )}?openDsaFor=${encodeURIComponent(adAccountId)}`;
                 }}
                 onActionComplete={(action) => setActions((prev) => [action, ...prev])}
               />

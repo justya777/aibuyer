@@ -17,9 +17,11 @@ import type {
   GetAdsParams,
   GetCampaignsParams,
   GetInsightsParams,
+  GetDsaSettingsParams,
   ListTenantPagesParams,
   GetPagesParams,
   PreflightCreateCampaignBundleParams,
+  SetDsaSettingsParams,
   SetDefaultPageForAdAccountParams,
   SyncTenantAssetsParams,
   TenantPageOption,
@@ -101,7 +103,7 @@ export class FacebookServiceFacade {
     this.accountsApi = new AccountsApi(this.graphClient);
     this.campaignsApi = new CampaignsApi(this.graphClient);
     this.adSetsApi = new AdSetsApi(this.graphClient, this.targetingApi, this.dsaService, pageResolver);
-    this.adsApi = new AdsApi(this.graphClient, pageResolver);
+    this.adsApi = new AdsApi(this.graphClient, pageResolver, this.dsaService);
     this.insightsApi = new InsightsApi(this.graphClient, this.env.insightsCacheTtlMs);
   }
 
@@ -294,35 +296,128 @@ export class FacebookServiceFacade {
     );
     const countries = extractCountryCodesFromTargeting(params.adSetTargeting);
     const euTargeting = isEuTargeting(countries);
-    if (!euTargeting) {
-      return { ok: true, euTargeting: false };
+    const preflightContext = this.buildContext(actor, { adAccountId: params.accountId });
+    if (euTargeting) {
+      await this.dsaService.ensureDsaForAdAccount(
+        preflightContext,
+        params.accountId
+      );
     }
+    await this.accountsApi.ensurePaymentMethodConfigured(preflightContext, params.accountId);
+    return { ok: true, euTargeting };
+  }
 
-    await this.dsaService.ensureDsaForAdAccount(
-      this.buildContext(actor, { adAccountId: params.accountId }),
-      params.accountId
+  async getDsaSettings(params: GetDsaSettingsParams): Promise<{
+    adAccountId: string;
+    dsaBeneficiary: string | null;
+    dsaPayor: string | null;
+    source: string | null;
+    updatedAt: Date | null;
+    configured: boolean;
+  }> {
+    const actor = await this.requireActor(params, 'get_dsa_settings');
+    const normalizedAdAccountId = normalizeAdAccountId(params.adAccountId);
+    await this.tenantRegistry.assertAdAccountAllowed(
+      actor.tenantId,
+      normalizedAdAccountId,
+      actor.userId,
+      actor.isPlatformAdmin
     );
-    return { ok: true, euTargeting: true };
+    const settings = await this.dsaService.getDsaSettings(
+      this.buildContext(actor, { adAccountId: normalizedAdAccountId }),
+      normalizedAdAccountId
+    );
+    return {
+      adAccountId: normalizedAdAccountId,
+      dsaBeneficiary: settings?.dsaBeneficiary || null,
+      dsaPayor: settings?.dsaPayor || null,
+      source: settings?.dsaSource || null,
+      updatedAt: settings?.dsaUpdatedAt || null,
+      configured: Boolean(settings?.dsaBeneficiary && settings?.dsaPayor),
+    };
+  }
+
+  async setDsaSettings(params: SetDsaSettingsParams): Promise<{
+    adAccountId: string;
+    dsaBeneficiary: string;
+    dsaPayor: string;
+    source: string;
+    updatedAt: Date;
+    configured: boolean;
+  }> {
+    const actor = await this.requireActor(params, 'set_dsa_settings');
+    const normalizedAdAccountId = normalizeAdAccountId(params.adAccountId);
+    await this.tenantRegistry.assertAdAccountAllowed(
+      actor.tenantId,
+      normalizedAdAccountId,
+      actor.userId,
+      actor.isPlatformAdmin
+    );
+    const normalizedBeneficiary = params.dsaBeneficiary.trim();
+    const normalizedPayor = params.dsaPayor.trim();
+    if (!normalizedBeneficiary || !normalizedPayor) {
+      throw new Error('dsaBeneficiary and dsaPayor are required.');
+    }
+    const resolvedBusinessId = params.businessId || (await this.resolveAdAccountBusinessId(actor.tenantId, normalizedAdAccountId));
+    const settings = await this.dsaService.setDsaSettings(
+      this.buildContext(actor, { adAccountId: normalizedAdAccountId }),
+      normalizedAdAccountId,
+      {
+        dsaBeneficiary: normalizedBeneficiary,
+        dsaPayor: normalizedPayor,
+        businessId: resolvedBusinessId || null,
+      }
+    );
+    return {
+      adAccountId: normalizedAdAccountId,
+      dsaBeneficiary: settings.dsaBeneficiary,
+      dsaPayor: settings.dsaPayor,
+      source: settings.dsaSource,
+      updatedAt: settings.dsaUpdatedAt,
+      configured: Boolean(settings.dsaBeneficiary && settings.dsaPayor),
+    };
   }
 
   async autofillDsaForAdAccount(
     params: AutofillDsaParams
-  ): Promise<{ adAccountId: string; source: string; updatedAt: Date }> {
+  ): Promise<{
+    adAccountId: string;
+    dsaBeneficiary: string;
+    dsaPayor: string;
+    source: string;
+    updatedAt: Date;
+    configured: boolean;
+  }> {
     const actor = await this.requireActor(params, 'autofill_dsa_for_ad_account');
+    const normalizedAdAccountId = normalizeAdAccountId(params.adAccountId);
     await this.tenantRegistry.assertAdAccountAllowed(
       actor.tenantId,
-      params.adAccountId,
+      normalizedAdAccountId,
       actor.userId,
       actor.isPlatformAdmin
     );
-    const settings = await this.dsaService.ensureDsaForAdAccount(
-      this.buildContext(actor, { adAccountId: params.adAccountId }),
-      params.adAccountId
+    const resolvedBusinessId = await this.resolveAdAccountBusinessId(actor.tenantId, normalizedAdAccountId);
+    const ensured = await this.dsaService.ensureDsaForAdAccount(
+      this.buildContext(actor, { adAccountId: normalizedAdAccountId }),
+      normalizedAdAccountId
+    );
+    const settings = await this.dsaService.setDsaSettings(
+      this.buildContext(actor, { adAccountId: normalizedAdAccountId }),
+      normalizedAdAccountId,
+      {
+        dsaBeneficiary: ensured.dsaBeneficiary,
+        dsaPayor: ensured.dsaPayor,
+        source: ensured.dsaSource,
+        businessId: resolvedBusinessId || null,
+      }
     );
     return {
-      adAccountId: params.adAccountId,
+      adAccountId: normalizedAdAccountId,
+      dsaBeneficiary: settings.dsaBeneficiary,
+      dsaPayor: settings.dsaPayor,
       source: settings.dsaSource,
       updatedAt: settings.dsaUpdatedAt,
+      configured: Boolean(settings.dsaBeneficiary && settings.dsaPayor),
     };
   }
 
@@ -853,6 +948,24 @@ export class FacebookServiceFacade {
       isPlatformAdmin: actor.isPlatformAdmin,
       ...extras,
     };
+  }
+
+  private async resolveAdAccountBusinessId(
+    tenantId: string,
+    normalizedAdAccountId: string
+  ): Promise<string | null> {
+    const mapping = await prisma.tenantAdAccount.findUnique({
+      where: {
+        tenantId_adAccountId: {
+          tenantId,
+          adAccountId: normalizedAdAccountId,
+        },
+      },
+      select: {
+        businessId: true,
+      },
+    });
+    return mapping?.businessId || null;
   }
 
   private async logMutation(

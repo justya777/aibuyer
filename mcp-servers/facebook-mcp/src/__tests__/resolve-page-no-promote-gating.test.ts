@@ -5,6 +5,11 @@ describe('resolvePageId integration', () => {
     const graphClient = {
       request: jest
         .fn()
+        .mockResolvedValueOnce({
+          data: { targeting: { geo_locations: { countries: ['US'] } } },
+          status: 200,
+          headers: {},
+        })
         .mockResolvedValueOnce({ data: { id: '12345' }, status: 200, headers: {} })
         .mockResolvedValueOnce({
           data: {

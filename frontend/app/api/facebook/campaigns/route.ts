@@ -19,29 +19,48 @@ export async function GET(request: NextRequest) {
 
     const context = await resolveTenantContext(request);
     const mcpClient = new MCPClient(context);
+    const normalizedAccountId = accountId.startsWith('act_') ? accountId : `act_${accountId}`;
 
     // Call the Facebook MCP server to get campaigns (excluding problematic statuses)
     const rawCampaigns = await mcpClient.callTool('get_campaigns', {
-      accountId: accountId,
+      accountId: normalizedAccountId,
       limit: 50,
-      status: ['ACTIVE', 'PAUSED', 'PENDING_REVIEW', 'DISAPPROVED', 'PREAPPROVED', 'PENDING_BILLING_INFO', 'CAMPAIGN_PAUSED', 'ADSET_PAUSED', 'IN_PROCESS', 'WITH_ISSUES']
-      // Excluded 'ARCHIVED' as it often contains deleted campaigns
+      status: ['ACTIVE', 'PAUSED', 'CAMPAIGN_PAUSED', 'ADSET_PAUSED'],
     });
 
-    console.log(`Raw Facebook campaigns fetched for account ${accountId}:`, rawCampaigns);
+    console.log(`Raw Facebook campaigns fetched for account ${normalizedAccountId}:`, rawCampaigns);
 
-    // Apply the campaigns (filtered by status exclusion above)
-    const campaigns = rawCampaigns || [];
+    // Keep only campaigns that come from the requested ad account and dedupe by ID.
+    const campaigns = (Array.isArray(rawCampaigns) ? rawCampaigns : [])
+      .filter((campaign) => {
+        const campaignAccountId =
+          typeof campaign?.accountId === 'string' ? campaign.accountId : '';
+        return campaignAccountId === normalizedAccountId;
+      })
+      .filter((campaign) => campaign?.status === 'active' || campaign?.status === 'paused')
+      .filter(
+        (campaign, index, all) =>
+          all.findIndex((entry) => entry.id === campaign.id) === index
+      );
 
-    console.log(`Filtered campaigns for account ${accountId}:`, campaigns);
+    console.log(`Filtered campaigns for account ${normalizedAccountId}:`, campaigns);
 
-    return NextResponse.json({
-      success: true,
-      campaigns: campaigns || [],
-      count: campaigns ? campaigns.length : 0,
-      accountId: accountId,
-      filteredOut: rawCampaigns ? rawCampaigns.length - campaigns.length : 0
-    });
+    return NextResponse.json(
+      {
+        success: true,
+        campaigns,
+        count: campaigns.length,
+        accountId: normalizedAccountId,
+        filteredOut: Array.isArray(rawCampaigns) ? rawCampaigns.length - campaigns.length : 0,
+      },
+      {
+        headers: {
+          'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+          Pragma: 'no-cache',
+          Expires: '0',
+        },
+      }
+    );
 
   } catch (error) {
     if (error instanceof AuthRequiredError) {

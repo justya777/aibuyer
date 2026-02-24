@@ -17,6 +17,7 @@ import { logger } from './utils/logger.js';
 import { TenantIsolationError } from './fb/core/types.js';
 import { DsaComplianceError } from './fb/dsa.js';
 import { PageResolutionError } from './fb/core/page-resolution.js';
+import { PaymentMethodRequiredError } from './fb/accounts.js';
 
 const rootEnvPath = path.resolve(process.cwd(), '../../.env');
 if (existsSync(rootEnvPath)) {
@@ -92,8 +93,13 @@ class FacebookMCPServer {
         const isTenantIsolation = error instanceof TenantIsolationError;
         const isDsaCompliance = error instanceof DsaComplianceError;
         const isDefaultPageRequired = error instanceof PageResolutionError;
+        const isPaymentMethodRequired = error instanceof PaymentMethodRequiredError;
         const statusCode =
-          isTenantIsolation ? 403 : isDsaCompliance || isDefaultPageRequired ? 422 : 500;
+          isTenantIsolation
+            ? 403
+            : isDsaCompliance || isDefaultPageRequired || isPaymentMethodRequired
+              ? 422
+              : 500;
         logger.error('HTTP MCP error', {
           method,
           message: error instanceof Error ? error.message : String(error),
@@ -104,13 +110,20 @@ class FacebookMCPServer {
           id: requestId || null,
           jsonrpc: '2.0',
           error: {
-            code: isTenantIsolation ? 403 : isDsaCompliance || isDefaultPageRequired ? 422 : -32603,
+            code:
+              isTenantIsolation
+                ? 403
+                : isDsaCompliance || isDefaultPageRequired || isPaymentMethodRequired
+                  ? 422
+                  : -32603,
             message: isTenantIsolation
               ? 'Forbidden'
               : isDsaCompliance
                 ? 'DSA_REQUIRED'
                 : isDefaultPageRequired
                   ? 'DEFAULT_PAGE_REQUIRED'
+                  : isPaymentMethodRequired
+                    ? 'PAYMENT_METHOD_REQUIRED'
                 : 'Internal error',
             data:
               error instanceof DsaComplianceError
@@ -130,6 +143,14 @@ class FacebookMCPServer {
                         'Select and save a default page for this ad account.',
                         'Retry the campaign workflow.',
                       ],
+                      partial: false,
+                      success: false,
+                    }
+                : error instanceof PaymentMethodRequiredError
+                  ? {
+                      code: error.code,
+                      message: error.message,
+                      nextSteps: error.nextSteps,
                       partial: false,
                       success: false,
                     }

@@ -315,6 +315,21 @@ export const AutofillDsaForAdAccountSchema = z.object({
   adAccountId: z.string(),
 });
 
+export const GetDsaSettingsSchema = z.object({
+  tenantId: tenantIdRequired,
+  ...actorFields,
+  adAccountId: z.string(),
+});
+
+export const SetDsaSettingsSchema = z.object({
+  tenantId: tenantIdRequired,
+  ...actorFields,
+  adAccountId: z.string(),
+  dsaBeneficiary: z.string().min(1),
+  dsaPayor: z.string().min(1),
+  businessId: z.string().optional(),
+});
+
 export const tools: Tool[] = [
   {
     name: 'get_accounts',
@@ -574,6 +589,33 @@ export const tools: Tool[] = [
     },
   },
   {
+    name: 'get_dsa_settings',
+    description: 'Get DSA beneficiary/payor settings for an ad account',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tenantId: { type: 'string' },
+        adAccountId: { type: 'string' },
+      },
+      required: ['tenantId', 'adAccountId'],
+    },
+  },
+  {
+    name: 'set_dsa_settings',
+    description: 'Set DSA beneficiary/payor settings for an ad account',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tenantId: { type: 'string' },
+        adAccountId: { type: 'string' },
+        dsaBeneficiary: { type: 'string' },
+        dsaPayor: { type: 'string' },
+        businessId: { type: 'string' },
+      },
+      required: ['tenantId', 'adAccountId', 'dsaBeneficiary', 'dsaPayor'],
+    },
+  },
+  {
     name: 'autofill_dsa_for_ad_account',
     description: 'Autofill DSA beneficiary/payor for an ad account from Meta recommendations',
     inputSchema: {
@@ -657,6 +699,8 @@ export const toolSchemas = {
   create_ad: CreateAdSchema,
   update_ad: UpdateAdSchema,
   preflight_create_campaign_bundle: PreflightCreateCampaignBundleSchema,
+  get_dsa_settings: GetDsaSettingsSchema,
+  set_dsa_settings: SetDsaSettingsSchema,
   autofill_dsa_for_ad_account: AutofillDsaForAdAccountSchema,
   duplicate_campaign: DuplicateCampaignSchema,
   duplicate_adset: DuplicateAdSetSchema,

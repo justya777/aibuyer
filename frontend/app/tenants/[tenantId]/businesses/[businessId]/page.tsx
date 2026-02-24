@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useMemo, useState, useEffect, useCallback } from 'react';
-import { useParams } from 'next/navigation';
+import { useParams, useSearchParams } from 'next/navigation';
 
 type AdAccountRow = {
   adAccountId: string;
@@ -11,7 +11,10 @@ type AdAccountRow = {
   defaultPageId: string | null;
   dsaBeneficiary: string | null;
   dsaPayor: string | null;
+  dsaSource: string | null;
   dsaUpdatedAt: string | null;
+  dsaConfigured?: boolean;
+  dsaStatus?: 'CONFIGURED' | 'MISSING';
 };
 
 type PageRow = {
@@ -23,8 +26,18 @@ type PageRow = {
 
 type TabName = 'adAccounts' | 'pages' | 'settings';
 
+type DsaSettingsPayload = {
+  adAccountId: string;
+  dsaBeneficiary: string | null;
+  dsaPayor: string | null;
+  dsaSource: string | null;
+  dsaUpdatedAt: string | null;
+  configured: boolean;
+};
+
 export default function BusinessPortfolioDetailPage() {
   const params = useParams<{ tenantId: string; businessId: string }>();
+  const searchParams = useSearchParams();
   const tenantId = params.tenantId;
   const businessId = params.businessId;
   const [tab, setTab] = useState<TabName>('adAccounts');
@@ -35,6 +48,17 @@ export default function BusinessPortfolioDetailPage() {
   const [defaultPageUpdatingFor, setDefaultPageUpdatingFor] = useState<string | null>(null);
   const [pageTargetMap, setPageTargetMap] = useState<Record<string, string>>({});
   const [isSyncing, setIsSyncing] = useState(false);
+  const [editingDsaAccountId, setEditingDsaAccountId] = useState<string | null>(null);
+  const [dsaBeneficiaryInput, setDsaBeneficiaryInput] = useState('');
+  const [dsaPayorInput, setDsaPayorInput] = useState('');
+  const [dsaSource, setDsaSource] = useState<string | null>(null);
+  const [dsaUpdatedAt, setDsaUpdatedAt] = useState<string | null>(null);
+  const [dsaError, setDsaError] = useState<string | null>(null);
+  const [isSavingDsa, setIsSavingDsa] = useState(false);
+  const [isAutofillingDsa, setIsAutofillingDsa] = useState(false);
+  const [isLoadingDsa, setIsLoadingDsa] = useState(false);
+  const [handledOpenDsaAccountId, setHandledOpenDsaAccountId] = useState<string | null>(null);
+  const openDsaFor = searchParams.get('openDsaFor');
 
   const loadData = useCallback(async () => {
     if (!tenantId || !businessId) return;
@@ -78,9 +102,26 @@ export default function BusinessPortfolioDetailPage() {
     }
   }, [tenantId, businessId]);
 
+  useEffect(() => {
+    if (!openDsaFor || isLoading) return;
+    if (handledOpenDsaAccountId === openDsaFor) return;
+    const matchingAccount = adAccounts.find(
+      (account) => account.adAccountId === openDsaFor || decodeURIComponent(account.adAccountId) === openDsaFor
+    );
+    if (!matchingAccount) {
+      return;
+    }
+    setHandledOpenDsaAccountId(openDsaFor);
+    void openFixDsaModal(matchingAccount.adAccountId);
+  }, [openDsaFor, isLoading, handledOpenDsaAccountId, adAccounts, openFixDsaModal]);
+
   const fallbackOnlyPages = useMemo(
     () => pages.length > 0 && pages.every((page) => page.source === 'FALLBACK_UNVERIFIED'),
     [pages]
+  );
+  const editingDsaAccount = useMemo(
+    () => adAccounts.find((account) => account.adAccountId === editingDsaAccountId) || null,
+    [adAccounts, editingDsaAccountId]
   );
 
   async function handleSetDefaultPage(adAccountId: string, pageId: string): Promise<void> {
@@ -137,6 +178,107 @@ export default function BusinessPortfolioDetailPage() {
       setError(syncError instanceof Error ? syncError.message : 'Failed to sync business assets.');
     } finally {
       setIsSyncing(false);
+    }
+  }
+
+  function setModalFromSettings(settings: DsaSettingsPayload): void {
+    setDsaBeneficiaryInput(settings.dsaBeneficiary || '');
+    setDsaPayorInput(settings.dsaPayor || '');
+    setDsaSource(settings.dsaSource);
+    setDsaUpdatedAt(settings.dsaUpdatedAt);
+  }
+
+  async function fetchDsaSettings(adAccountId: string): Promise<DsaSettingsPayload> {
+    const response = await fetch(
+      `/api/tenants/${tenantId}/ad-accounts/${encodeURIComponent(adAccountId)}/dsa`,
+      {
+        headers: {
+          'x-tenant-id': tenantId,
+        },
+      }
+    );
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.error || 'Failed to load DSA settings.');
+    }
+    return payload.settings as DsaSettingsPayload;
+  }
+
+  async function openFixDsaModal(adAccountId: string): Promise<void> {
+    setEditingDsaAccountId(adAccountId);
+    setDsaError(null);
+    setIsLoadingDsa(true);
+    try {
+      const settings = await fetchDsaSettings(adAccountId);
+      setModalFromSettings(settings);
+    } catch (loadError) {
+      setDsaError(loadError instanceof Error ? loadError.message : 'Failed to load DSA settings.');
+    } finally {
+      setIsLoadingDsa(false);
+    }
+  }
+
+  async function handleSaveDsa(): Promise<void> {
+    if (!tenantId || !editingDsaAccountId) return;
+    setIsSavingDsa(true);
+    setDsaError(null);
+    try {
+      const response = await fetch(
+        `/api/tenants/${tenantId}/ad-accounts/${encodeURIComponent(editingDsaAccountId)}/dsa`,
+        {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-tenant-id': tenantId,
+          },
+          body: JSON.stringify({
+            dsaBeneficiary: dsaBeneficiaryInput,
+            dsaPayor: dsaPayorInput,
+          }),
+        }
+      );
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || 'Failed to save DSA settings.');
+      }
+      if (payload.settings) {
+        setModalFromSettings(payload.settings as DsaSettingsPayload);
+      }
+      await loadData();
+    } catch (saveError) {
+      setDsaError(saveError instanceof Error ? saveError.message : 'Failed to save DSA settings.');
+    } finally {
+      setIsSavingDsa(false);
+    }
+  }
+
+  async function handleAutofillDsa(): Promise<void> {
+    if (!tenantId || !editingDsaAccountId) return;
+    setIsAutofillingDsa(true);
+    setDsaError(null);
+    try {
+      const response = await fetch(
+        `/api/tenants/${tenantId}/ad-accounts/${encodeURIComponent(editingDsaAccountId)}/dsa/autofill`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-tenant-id': tenantId,
+          },
+        }
+      );
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || 'Failed to autofill DSA settings.');
+      }
+      if (payload.settings) {
+        setModalFromSettings(payload.settings as DsaSettingsPayload);
+      }
+      await loadData();
+    } catch (autofillError) {
+      setDsaError(autofillError instanceof Error ? autofillError.message : 'Failed to autofill DSA settings.');
+    } finally {
+      setIsAutofillingDsa(false);
     }
   }
 
@@ -244,12 +386,22 @@ export default function BusinessPortfolioDetailPage() {
                     </td>
                     <td className="py-2 pr-4">
                       {account.dsaBeneficiary && account.dsaPayor ? (
-                        <span className="text-green-700">Configured</span>
+                        <div>
+                          <span className="text-green-700">Configured</span>
+                          <p className="text-xs text-gray-500">{account.dsaSource || 'MANUAL'}</p>
+                        </div>
                       ) : (
                         <span className="text-amber-700">Missing</span>
                       )}
                     </td>
-                    <td className="py-2 pr-4">
+                    <td className="py-2 pr-4 space-x-2">
+                      <button
+                        type="button"
+                        className="px-2 py-1 border border-blue-300 rounded text-blue-700 hover:bg-blue-50"
+                        onClick={() => void openFixDsaModal(account.adAccountId)}
+                      >
+                        {account.dsaBeneficiary && account.dsaPayor ? 'Edit DSA' : 'Fix DSA'}
+                      </button>
                       <Link
                         href={`/tenants/${tenantId}/businesses/${encodeURIComponent(
                           businessId
@@ -349,6 +501,80 @@ export default function BusinessPortfolioDetailPage() {
             </ul>
           </div>
         </section>
+      ) : null}
+
+      {editingDsaAccount ? (
+        <div className="fixed inset-0 bg-black/30 flex items-center justify-center p-4">
+          <div className="bg-white rounded-lg border border-gray-200 p-4 w-full max-w-lg space-y-3">
+            <h3 className="text-lg font-semibold text-gray-900">Fix DSA Settings</h3>
+            <p className="text-xs text-gray-500">Ad Account: {editingDsaAccount.adAccountId}</p>
+            {dsaError ? <p className="text-sm text-red-600">{dsaError}</p> : null}
+            {isLoadingDsa ? <p className="text-sm text-gray-600">Loading current DSA settings...</p> : null}
+
+            {!isLoadingDsa ? (
+              <>
+                <div className="rounded border border-gray-200 p-2 text-xs text-gray-600">
+                  <p>Source: {dsaSource || 'Not configured'}</p>
+                  <p>Updated: {dsaUpdatedAt ? new Date(dsaUpdatedAt).toLocaleString() : 'Never'}</p>
+                </div>
+                <button
+                  type="button"
+                  className="px-2 py-1 text-xs border rounded border-blue-300 text-blue-700 hover:bg-blue-50 disabled:opacity-60"
+                  disabled={isAutofillingDsa || isSavingDsa}
+                  onClick={() => void handleAutofillDsa()}
+                >
+                  {isAutofillingDsa ? 'Autofilling...' : 'Autofill from Meta'}
+                </button>
+                <label className="block text-sm">
+                  <span className="text-gray-700">Beneficiary</span>
+                  <input
+                    className="mt-1 w-full border border-gray-300 rounded px-2 py-1"
+                    value={dsaBeneficiaryInput}
+                    onChange={(event) => setDsaBeneficiaryInput(event.target.value)}
+                    required
+                  />
+                </label>
+                <label className="block text-sm">
+                  <span className="text-gray-700">Payor</span>
+                  <input
+                    className="mt-1 w-full border border-gray-300 rounded px-2 py-1"
+                    value={dsaPayorInput}
+                    onChange={(event) => setDsaPayorInput(event.target.value)}
+                    required
+                  />
+                </label>
+              </>
+            ) : null}
+
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                className="px-3 py-1 text-sm border border-gray-300 rounded"
+                disabled={isSavingDsa || isAutofillingDsa}
+                onClick={() => {
+                  setEditingDsaAccountId(null);
+                  setDsaError(null);
+                }}
+              >
+                Close
+              </button>
+              <button
+                type="button"
+                className="px-3 py-1 text-sm bg-blue-600 text-white rounded disabled:opacity-60"
+                disabled={
+                  isLoadingDsa ||
+                  isSavingDsa ||
+                  isAutofillingDsa ||
+                  !dsaBeneficiaryInput.trim() ||
+                  !dsaPayorInput.trim()
+                }
+                onClick={() => void handleSaveDsa()}
+              >
+                {isSavingDsa ? 'Saving...' : 'Save'}
+              </button>
+            </div>
+          </div>
+        </div>
       ) : null}
     </main>
   );

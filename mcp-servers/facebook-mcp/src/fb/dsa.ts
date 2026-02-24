@@ -45,6 +45,13 @@ export interface DsaSettings {
   dsaUpdatedAt: Date;
 }
 
+interface PersistDsaSettingsInput {
+  dsaBeneficiary: string;
+  dsaPayor: string;
+  dsaSource: DsaSource;
+  businessId?: string | null;
+}
+
 export class DsaComplianceError extends Error {
   readonly code = 'DSA_REQUIRED';
   readonly nextSteps: string[];
@@ -148,10 +155,7 @@ export class DsaService {
     this.dbClient = dbClient;
   }
 
-  async getDsaSettingsFromDb(
-    ctx: RequestContext,
-    adAccountId: string
-  ): Promise<DsaSettings | null> {
+  async getDsaSettings(ctx: RequestContext, adAccountId: string): Promise<DsaSettings | null> {
     const normalizedAdAccountId = normalizeAdAccountId(adAccountId);
     let settings;
     try {
@@ -186,6 +190,35 @@ export class DsaService {
     };
   }
 
+  async setDsaSettings(
+    ctx: RequestContext,
+    adAccountId: string,
+    input: {
+      dsaBeneficiary: string;
+      dsaPayor: string;
+      source?: DsaSource;
+      businessId?: string | null;
+    }
+  ): Promise<DsaSettings> {
+    const normalizedAdAccountId = normalizeAdAccountId(adAccountId);
+    const normalizedBeneficiary = input.dsaBeneficiary.trim();
+    const normalizedPayor = input.dsaPayor.trim();
+    const source = input.source || DsaSource.MANUAL;
+    const payload: PersistDsaSettingsInput = {
+      dsaBeneficiary: normalizedBeneficiary,
+      dsaPayor: normalizedPayor,
+      dsaSource: source,
+      businessId: input.businessId,
+    };
+    const persisted = await this.persistDsaSettings(ctx, normalizedAdAccountId, payload);
+    return {
+      dsaBeneficiary: persisted.dsaBeneficiary || normalizedBeneficiary,
+      dsaPayor: persisted.dsaPayor || normalizedPayor,
+      dsaSource: persisted.dsaSource,
+      dsaUpdatedAt: persisted.dsaUpdatedAt,
+    };
+  }
+
   async fetchDsaRecommendationsFromMeta(
     ctx: RequestContext,
     adAccountId: string
@@ -207,7 +240,7 @@ export class DsaService {
 
   async ensureDsaForAdAccount(ctx: RequestContext, adAccountId: string): Promise<DsaSettings> {
     const normalizedAdAccountId = normalizeAdAccountId(adAccountId);
-    const existing = await this.getDsaSettingsFromDb(ctx, normalizedAdAccountId);
+    const existing = await this.getDsaSettings(ctx, normalizedAdAccountId);
     if (existing) {
       return existing;
     }
@@ -218,55 +251,11 @@ export class DsaService {
       throw new DsaComplianceError();
     }
     const source = recommendation ? DsaSource.RECOMMENDATION : DsaSource.MANUAL;
-
-    let persisted;
-    try {
-      persisted = await this.dbClient.adAccountSettings.upsert({
-        where: {
-          tenantId_adAccountId: {
-            tenantId: ctx.tenantId,
-            adAccountId: normalizedAdAccountId,
-          },
-        },
-        update: {
-          dsaBeneficiary: fallback.dsaBeneficiary,
-          dsaPayor: fallback.dsaPayor,
-          dsaSource: source,
-          dsaUpdatedAt: new Date(),
-        },
-        create: {
-          tenantId: ctx.tenantId,
-          adAccountId: normalizedAdAccountId,
-          dsaBeneficiary: fallback.dsaBeneficiary,
-          dsaPayor: fallback.dsaPayor,
-          dsaSource: source,
-          dsaUpdatedAt: new Date(),
-        },
-      });
-    } catch (error) {
-      if (isMissingAdAccountSettingsTableError(error)) {
-        logger.warn('AdAccountSettings table missing; skipping DSA DB persist', {
-          tenantId: ctx.tenantId,
-          adAccountId: normalizedAdAccountId,
-        });
-        return {
-          dsaBeneficiary: fallback.dsaBeneficiary,
-          dsaPayor: fallback.dsaPayor,
-          dsaSource: source,
-          dsaUpdatedAt: new Date(),
-        };
-      }
-      throw error;
-    }
-
-    if (!persisted) {
-      return {
-        dsaBeneficiary: fallback.dsaBeneficiary,
-        dsaPayor: fallback.dsaPayor,
-        dsaSource: source,
-        dsaUpdatedAt: new Date(),
-      };
-    }
+    const persisted = await this.persistDsaSettings(ctx, normalizedAdAccountId, {
+      dsaBeneficiary: fallback.dsaBeneficiary,
+      dsaPayor: fallback.dsaPayor,
+      dsaSource: source,
+    });
 
     return {
       dsaBeneficiary: persisted.dsaBeneficiary || fallback.dsaBeneficiary,
@@ -274,6 +263,73 @@ export class DsaService {
       dsaSource: persisted.dsaSource,
       dsaUpdatedAt: persisted.dsaUpdatedAt,
     };
+  }
+
+  private async persistDsaSettings(
+    ctx: RequestContext,
+    normalizedAdAccountId: string,
+    payload: PersistDsaSettingsInput
+  ): Promise<{
+    dsaBeneficiary: string;
+    dsaPayor: string;
+    dsaSource: DsaSource;
+    dsaUpdatedAt: Date;
+  }> {
+    const now = new Date();
+    try {
+      const persisted = await this.dbClient.adAccountSettings.upsert({
+        where: {
+          tenantId_adAccountId: {
+            tenantId: ctx.tenantId,
+            adAccountId: normalizedAdAccountId,
+          },
+        },
+        update: {
+          businessId: payload.businessId === undefined ? undefined : payload.businessId,
+          dsaBeneficiary: payload.dsaBeneficiary,
+          dsaPayor: payload.dsaPayor,
+          dsaSource: payload.dsaSource,
+          dsaUpdatedAt: now,
+        },
+        create: {
+          tenantId: ctx.tenantId,
+          businessId: payload.businessId ?? null,
+          adAccountId: normalizedAdAccountId,
+          dsaBeneficiary: payload.dsaBeneficiary,
+          dsaPayor: payload.dsaPayor,
+          dsaSource: payload.dsaSource,
+          dsaUpdatedAt: now,
+        },
+      });
+      if (!persisted) {
+        return {
+          dsaBeneficiary: payload.dsaBeneficiary,
+          dsaPayor: payload.dsaPayor,
+          dsaSource: payload.dsaSource,
+          dsaUpdatedAt: now,
+        };
+      }
+      return {
+        dsaBeneficiary: persisted.dsaBeneficiary || payload.dsaBeneficiary,
+        dsaPayor: persisted.dsaPayor || payload.dsaPayor,
+        dsaSource: persisted.dsaSource,
+        dsaUpdatedAt: persisted.dsaUpdatedAt,
+      };
+    } catch (error) {
+      if (isMissingAdAccountSettingsTableError(error)) {
+        logger.warn('AdAccountSettings table missing; skipping DSA DB persist', {
+          tenantId: ctx.tenantId,
+          adAccountId: normalizedAdAccountId,
+        });
+        return {
+          dsaBeneficiary: payload.dsaBeneficiary,
+          dsaPayor: payload.dsaPayor,
+          dsaSource: payload.dsaSource,
+          dsaUpdatedAt: now,
+        };
+      }
+      throw error;
+    }
   }
 
   private async buildAutomaticTenantFallback(
@@ -297,4 +353,21 @@ export class DsaService {
       dsaPayor: tenantName,
     };
   }
+}
+
+export async function attachDsaPayloadForEuTargeting(
+  dsaService: DsaService,
+  ctx: RequestContext,
+  adAccountId: string,
+  targeting: unknown,
+  payload: Record<string, unknown>
+): Promise<void> {
+  const countries = extractCountryCodesFromTargeting(targeting);
+  if (!isEuTargeting(countries)) {
+    return;
+  }
+
+  const dsaSettings = await dsaService.ensureDsaForAdAccount(ctx, adAccountId);
+  payload.dsa_beneficiary = dsaSettings.dsaBeneficiary;
+  payload.dsa_payor = dsaSettings.dsaPayor;
 }

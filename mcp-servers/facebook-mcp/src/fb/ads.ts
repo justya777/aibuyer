@@ -9,6 +9,7 @@ import { GraphClient } from './core/graph-client.js';
 import { PageResolver } from './core/page-resolution.js';
 import { normalizeAdAccountId } from './core/tenant-registry.js';
 import type { RequestContext } from './core/types.js';
+import { attachDsaPayloadForEuTargeting, DsaService } from './dsa.js';
 
 function mapAdStatus(status: string): 'active' | 'paused' | 'deleted' {
   switch ((status || '').toUpperCase()) {
@@ -48,10 +49,16 @@ function mapAd(record: Record<string, unknown>): FacebookAd {
 export class AdsApi {
   private readonly graphClient: GraphClient;
   private readonly pageResolver: PageResolver;
+  private readonly dsaService: DsaService;
 
-  constructor(graphClient: GraphClient, pageResolver: PageResolver = new PageResolver()) {
+  constructor(
+    graphClient: GraphClient,
+    pageResolver: PageResolver = new PageResolver(),
+    dsaService?: DsaService
+  ) {
     this.graphClient = graphClient;
     this.pageResolver = pageResolver;
+    this.dsaService = dsaService || new DsaService(graphClient);
   }
 
   async getAds(ctx: RequestContext, params: GetAdsParams): Promise<FacebookAd[]> {
@@ -114,6 +121,7 @@ export class AdsApi {
         payload.url_tags = params.creative.urlParameters;
       }
     }
+    await this.attachDsaComplianceIfNeeded(ctx, accountId, params.adSetId, payload);
 
     const response = await this.graphClient.request<{ id?: string }>(ctx, {
       method: 'POST',
@@ -237,5 +245,31 @@ export class AdsApi {
       },
     });
     return mapAd(response.data);
+  }
+
+  private async attachDsaComplianceIfNeeded(
+    ctx: RequestContext,
+    accountId: string,
+    adSetId: string,
+    payload: Record<string, unknown>
+  ): Promise<void> {
+    if (!adSetId) {
+      return;
+    }
+
+    const adSetResponse = await this.graphClient.request<Record<string, unknown>>(ctx, {
+      method: 'GET',
+      path: adSetId,
+      query: {
+        fields: 'targeting',
+      },
+    });
+    await attachDsaPayloadForEuTargeting(
+      this.dsaService,
+      ctx,
+      accountId,
+      adSetResponse.data.targeting,
+      payload
+    );
   }
 }

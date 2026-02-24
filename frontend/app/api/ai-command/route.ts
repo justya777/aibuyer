@@ -531,6 +531,9 @@ export async function POST(request: NextRequest) {
         const inferredCountriesFromCommand = inferEuCountriesFromCommand(command);
 
         for (const toolCall of message.tool_calls) {
+          if (conversationComplete) {
+            break;
+          }
           try {
             console.log(`🔧 Executing tool: ${toolCall.function.name}`);
             let toolArgs = JSON.parse(toolCall.function.arguments);
@@ -1020,14 +1023,90 @@ export async function POST(request: NextRequest) {
             });
 
             if (
-              errorMessage.includes('DSA_REQUIRED') ||
-              errorMessage.includes('Set DSA payor/beneficiary') ||
-              errorMessage.includes('Select a default Page for this ad account')
+              toolCall.function.name === 'create_ad' &&
+              isPaymentMethodRequiredError(errorMessage)
             ) {
-              blockingError =
-                errorMessage;
+              const createdAdSetAction = [...actions]
+                .reverse()
+                .find((action) => action.tool === 'create_adset' && action.success);
+              const createdCampaignAction = [...actions]
+                .reverse()
+                .find((action) => action.tool === 'create_campaign' && action.success);
+
+              if (createdAdSetAction?.result?.id) {
+                const rollbackAdSetArgs = {
+                  adSetId: createdAdSetAction.result.id,
+                  status: 'DELETED',
+                };
+                try {
+                  const rollbackAdSetResult = await mcpClient.callTool('update_adset', {
+                    ...rollbackAdSetArgs,
+                    businessId,
+                  });
+                  actions.push({
+                    type: getActionType('update_adset'),
+                    tool: 'update_adset',
+                    arguments: rollbackAdSetArgs,
+                    result: rollbackAdSetResult,
+                    success: true,
+                  });
+                  console.log(
+                    `↩️ Rolled back by deleting adset ${createdAdSetAction.result.id} after billing failure`
+                  );
+                } catch (rollbackError) {
+                  const rollbackErrorMessage =
+                    rollbackError instanceof Error ? rollbackError.message : 'Unknown rollback error';
+                  actions.push({
+                    type: getActionType('update_adset'),
+                    tool: 'update_adset',
+                    arguments: rollbackAdSetArgs,
+                    error: rollbackErrorMessage,
+                    success: false,
+                  });
+                  console.error('❌ Failed to pause adset during rollback:', rollbackErrorMessage);
+                }
+              }
+
+              if (createdCampaignAction?.result?.id) {
+                const rollbackCampaignArgs = {
+                  campaignId: createdCampaignAction.result.id,
+                  status: 'DELETED',
+                };
+                try {
+                  const rollbackCampaignResult = await mcpClient.callTool('update_campaign', {
+                    ...rollbackCampaignArgs,
+                    businessId,
+                  });
+                  actions.push({
+                    type: getActionType('update_campaign'),
+                    tool: 'update_campaign',
+                    arguments: rollbackCampaignArgs,
+                    result: rollbackCampaignResult,
+                    success: true,
+                  });
+                  console.log(
+                    `↩️ Rolled back by deleting campaign ${createdCampaignAction.result.id} after billing failure`
+                  );
+                } catch (rollbackError) {
+                  const rollbackErrorMessage =
+                    rollbackError instanceof Error ? rollbackError.message : 'Unknown rollback error';
+                  actions.push({
+                    type: getActionType('update_campaign'),
+                    tool: 'update_campaign',
+                    arguments: rollbackCampaignArgs,
+                    error: rollbackErrorMessage,
+                    success: false,
+                  });
+                  console.error('❌ Failed to pause campaign during rollback:', rollbackErrorMessage);
+                }
+              }
+            }
+
+            if (isBlockingConfigurationError(errorMessage)) {
+              blockingError = errorMessage;
               console.log('🛑 Blocking configuration error encountered. Stopping loop.');
               conversationComplete = true;
+              break;
             }
 
             if (toolFailureCounts[toolCall.function.name] >= MAX_CONSECUTIVE_TOOL_FAILURES) {
@@ -1063,6 +1142,10 @@ export async function POST(request: NextRequest) {
         console.log(`📊 Progress: campaign=${campaignCreated}, adset=${adsetCreated}, ads=${adsCreated}/${requestedAdCount}`);
         console.log(`📊 Management: fetched=${campaignsFetched}, updated=${campaignsUpdated}`);
         console.log(`📊 Duplicates: campaign=${campaignDuplicated}, adset=${adsetDuplicated}, ad=${adDuplicated}`);
+
+        if (conversationComplete) {
+          continue;
+        }
 
         // Handle DUPLICATE operations (using native Facebook /copies endpoint)
         // These are COMPLETE operations - no need for additional ad set/ad creation
@@ -1168,9 +1251,25 @@ export async function POST(request: NextRequest) {
 
     if (blockingError) {
       const normalizedBlockingError = normalizeBlockingError(blockingError);
+      const normalizedRequestAdAccountId = normalizeAdAccountId(accountId);
+      const action =
+        normalizedBlockingError.code === 'DSA_REQUIRED'
+          ? {
+              type: 'OPEN_DSA_SETTINGS',
+              tenantId: context.tenantId,
+              adAccountId: normalizedRequestAdAccountId,
+            }
+          : normalizedBlockingError.code === 'DEFAULT_PAGE_REQUIRED'
+            ? {
+                type: 'OPEN_DEFAULT_PAGE_SETTINGS',
+                tenantId: context.tenantId,
+                adAccountId: normalizedRequestAdAccountId,
+              }
+            : undefined;
       return NextResponse.json(
         {
           ...normalizedBlockingError,
+          action,
           success: false,
           partial: false,
           actions,
@@ -1204,6 +1303,11 @@ export async function POST(request: NextRequest) {
       { status: 500 }
     );
   }
+}
+
+function normalizeAdAccountId(value: string): string {
+  const trimmed = value.trim();
+  return trimmed.startsWith('act_') ? trimmed : `act_${trimmed}`;
 }
 
 function getActionType(toolName: string): string {
@@ -1267,7 +1371,7 @@ function inferEuCountriesFromCommand(command: string): string[] {
 }
 
 function normalizeBlockingError(errorMessage: string): {
-  code: 'DSA_REQUIRED' | 'DEFAULT_PAGE_REQUIRED';
+  code: 'DSA_REQUIRED' | 'DEFAULT_PAGE_REQUIRED' | 'PAYMENT_METHOD_REQUIRED';
   message: string;
   nextSteps: string[];
 } {
@@ -1289,6 +1393,20 @@ function normalizeBlockingError(errorMessage: string): {
 
   try {
     const parsed = JSON.parse(errorMessage) as { code?: string; message?: string; nextSteps?: string[] };
+    if (parsed && parsed.code === 'DEFAULT_PAGE_REQUIRED' && parsed.message) {
+      return {
+        code: 'DEFAULT_PAGE_REQUIRED',
+        message: parsed.message,
+        nextSteps: Array.isArray(parsed.nextSteps) ? parsed.nextSteps : [],
+      };
+    }
+    if (parsed && parsed.code === 'PAYMENT_METHOD_REQUIRED' && parsed.message) {
+      return {
+        code: 'PAYMENT_METHOD_REQUIRED',
+        message: parsed.message,
+        nextSteps: Array.isArray(parsed.nextSteps) ? parsed.nextSteps : [],
+      };
+    }
     if (parsed && parsed.code === 'DSA_REQUIRED' && parsed.message) {
       return {
         code: 'DSA_REQUIRED',
@@ -1298,6 +1416,20 @@ function normalizeBlockingError(errorMessage: string): {
     }
   } catch {
     // Fall through.
+  }
+
+  if (isPaymentMethodRequiredError(errorMessage)) {
+    return {
+      code: 'PAYMENT_METHOD_REQUIRED',
+      message:
+        errorMessage ||
+        'Add a valid payment method for this ad account before creating campaigns and ads.',
+      nextSteps: [
+        'Open Meta Ads Manager > Billing & payments for this ad account.',
+        'Add or confirm a valid payment method.',
+        'Retry the campaign creation request.',
+      ],
+    };
   }
 
   return {
@@ -1310,4 +1442,23 @@ function normalizeBlockingError(errorMessage: string): {
       'Retry the campaign creation request.',
     ],
   };
+}
+
+function isPaymentMethodRequiredError(errorMessage: string): boolean {
+  return (
+    errorMessage.includes('PAYMENT_METHOD_REQUIRED') ||
+    errorMessage.includes('No payment method') ||
+    errorMessage.includes('Update payment method') ||
+    errorMessage.includes('billing and payment centre') ||
+    errorMessage.includes('subcode=1359188')
+  );
+}
+
+function isBlockingConfigurationError(errorMessage: string): boolean {
+  return (
+    errorMessage.includes('DSA_REQUIRED') ||
+    errorMessage.includes('Set DSA payor/beneficiary') ||
+    errorMessage.includes('Select a default Page for this ad account') ||
+    isPaymentMethodRequiredError(errorMessage)
+  );
 }

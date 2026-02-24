@@ -13,10 +13,15 @@ function mapCampaignStatus(status: string): 'active' | 'paused' | 'deleted' {
   switch ((status || '').toUpperCase()) {
     case 'ACTIVE':
       return 'active';
+    case 'PAUSED':
+    case 'CAMPAIGN_PAUSED':
+    case 'ADSET_PAUSED':
+      return 'paused';
     case 'DELETED':
+    case 'ARCHIVED':
       return 'deleted';
     default:
-      return 'paused';
+      return 'deleted';
   }
 }
 
@@ -27,11 +32,15 @@ function toNumber(value: unknown): number {
 }
 
 function mapCampaign(record: Record<string, unknown>): FacebookCampaign {
+  const statusSource =
+    typeof record.effective_status === 'string' && record.effective_status.trim().length > 0
+      ? String(record.effective_status)
+      : String(record.status || 'PAUSED');
   return {
     id: String(record.id || ''),
     accountId: normalizeAdAccountId(String(record.account_id || '')),
     name: String(record.name || ''),
-    status: mapCampaignStatus(String(record.status || 'PAUSED')),
+    status: mapCampaignStatus(statusSource),
     objective: String(record.objective || ''),
     budget: {
       daily: record.daily_budget != null ? toNumber(record.daily_budget) : undefined,
@@ -92,7 +101,7 @@ export class CampaignsApi {
       query: {
         limit: params.limit || 50,
         fields:
-          'id,name,status,objective,account_id,created_time,updated_time,start_time,stop_time,daily_budget,lifetime_budget,budget_remaining',
+          'id,name,status,effective_status,objective,account_id,created_time,updated_time,start_time,stop_time,daily_budget,lifetime_budget,budget_remaining',
         effective_status: JSON.stringify(effectiveStatus),
       },
     });
@@ -202,7 +211,7 @@ export class CampaignsApi {
       path: campaignId,
       query: {
         fields:
-          'id,name,status,objective,account_id,daily_budget,lifetime_budget,budget_remaining,created_time,updated_time,start_time,stop_time',
+          'id,name,status,effective_status,objective,account_id,daily_budget,lifetime_budget,budget_remaining,created_time,updated_time,start_time,stop_time',
       },
     });
     return mapCampaign(response.data);

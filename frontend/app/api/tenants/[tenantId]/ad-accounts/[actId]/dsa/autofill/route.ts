@@ -2,10 +2,32 @@ import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { MCPClient } from '@/lib/mcp-client';
 import { AuthRequiredError, TenantAccessError, resolveTenantContext } from '@/lib/tenant-context';
+import type { DsaSource } from '@prisma/client';
 
 function normalizeAdAccountId(value: string): string {
   const trimmed = value.trim();
   return trimmed.startsWith('act_') ? trimmed : `act_${trimmed}`;
+}
+
+function normalizeSettingsPayload(
+  adAccountId: string,
+  settings: {
+    dsaBeneficiary?: string | null;
+    dsaPayor?: string | null;
+    dsaSource?: DsaSource | null;
+    dsaUpdatedAt?: Date | null;
+  } | null
+) {
+  const dsaBeneficiary = settings?.dsaBeneficiary || null;
+  const dsaPayor = settings?.dsaPayor || null;
+  return {
+    adAccountId,
+    dsaBeneficiary,
+    dsaPayor,
+    dsaSource: settings?.dsaSource || null,
+    dsaUpdatedAt: settings?.dsaUpdatedAt || null,
+    configured: Boolean(dsaBeneficiary && dsaPayor),
+  };
 }
 
 function handleError(error: unknown): NextResponse {
@@ -37,6 +59,26 @@ async function assertTenantAdmin(userId: string, tenantId: string, isPlatformAdm
   }
 }
 
+async function ensureTenantAdAccount(tenantId: string, adAccountId: string): Promise<{ businessId: string | null }> {
+  const asset = await db.tenantAdAccount.findUnique({
+    where: {
+      tenantId_adAccountId: {
+        tenantId,
+        adAccountId,
+      },
+    },
+    select: {
+      businessId: true,
+    },
+  });
+  if (!asset) {
+    throw new Error(`Ad account ${adAccountId} is not mapped to tenant ${tenantId}.`);
+  }
+  return {
+    businessId: asset.businessId || null,
+  };
+}
+
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ tenantId: string; actId: string }> }
@@ -51,21 +93,7 @@ export async function POST(
     }
     await assertTenantAdmin(context.userId, tenantId, context.isPlatformAdmin);
 
-    const asset = await db.tenantAdAccount.findUnique({
-      where: {
-        tenantId_adAccountId: {
-          tenantId,
-          adAccountId,
-        },
-      },
-      select: { id: true },
-    });
-    if (!asset) {
-      return NextResponse.json(
-        { success: false, error: `Ad account ${adAccountId} is not mapped to tenant ${tenantId}.` },
-        { status: 404 }
-      );
-    }
+    const asset = await ensureTenantAdAccount(tenantId, adAccountId);
 
     const mcpClient = new MCPClient({
       tenantId,
@@ -74,6 +102,7 @@ export async function POST(
     });
     const result = await mcpClient.callTool('autofill_dsa_for_ad_account', {
       adAccountId,
+      businessId: asset.businessId || undefined,
     });
 
     const settings = await db.adAccountSettings.findUnique({
@@ -83,22 +112,23 @@ export async function POST(
           adAccountId,
         },
       },
+      select: {
+        dsaBeneficiary: true,
+        dsaPayor: true,
+        dsaSource: true,
+        dsaUpdatedAt: true,
+      },
     });
 
     return NextResponse.json({
       success: true,
       result,
-      settings: settings
-        ? {
-            adAccountId: settings.adAccountId,
-            dsaBeneficiary: settings.dsaBeneficiary,
-            dsaPayor: settings.dsaPayor,
-            dsaSource: settings.dsaSource,
-            dsaUpdatedAt: settings.dsaUpdatedAt,
-          }
-        : null,
+      settings: normalizeSettingsPayload(adAccountId, settings),
     });
   } catch (error) {
+    if (error instanceof Error && error.message.includes('is not mapped to tenant')) {
+      return NextResponse.json({ success: false, error: error.message }, { status: 404 });
+    }
     return handleError(error);
   }
 }

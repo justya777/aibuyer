@@ -11,6 +11,22 @@ import { GraphClient } from './core/graph-client.js';
 import type { RequestContext } from './core/types.js';
 import { normalizeAdAccountId } from './core/tenant-registry.js';
 
+export class PaymentMethodRequiredError extends Error {
+  readonly code = 'PAYMENT_METHOD_REQUIRED';
+  readonly nextSteps: string[];
+
+  constructor(adAccountId?: string) {
+    const accountSuffix = adAccountId ? ` for ${adAccountId}` : '';
+    super(`Add a valid payment method${accountSuffix} before creating ads.`);
+    this.name = 'PaymentMethodRequiredError';
+    this.nextSteps = [
+      'Open Meta Ads Manager > Billing & payments for this ad account.',
+      'Add or confirm a valid payment method.',
+      'Retry the campaign workflow after billing is configured.',
+    ];
+  }
+}
+
 function mapAccountStatus(status: number): 'active' | 'inactive' | 'limited' | 'disabled' {
   switch (status) {
     case 1:
@@ -68,6 +84,45 @@ export class AccountsApi {
 
   constructor(graphClient: GraphClient) {
     this.graphClient = graphClient;
+  }
+
+  async ensurePaymentMethodConfigured(ctx: RequestContext, accountId: string): Promise<void> {
+    const normalizedAdAccountId = normalizeAdAccountId(accountId);
+    const response = await this.graphClient.request<Record<string, unknown>>(ctx, {
+      method: 'GET',
+      path: normalizedAdAccountId,
+      query: {
+        fields: 'funding_source,funding_source_details',
+      },
+    });
+    const account = response.data || {};
+    const fundingSource = account.funding_source;
+    const normalizedFundingSource =
+      typeof fundingSource === 'string'
+        ? fundingSource.trim()
+        : typeof fundingSource === 'number'
+          ? String(fundingSource)
+          : '';
+    const fundingSourceDetails =
+      account.funding_source_details &&
+      typeof account.funding_source_details === 'object' &&
+      !Array.isArray(account.funding_source_details)
+        ? (account.funding_source_details as Record<string, unknown>)
+        : null;
+    const detailsType =
+      typeof fundingSourceDetails?.type === 'string'
+        ? fundingSourceDetails.type.trim().toLowerCase()
+        : '';
+    const detailsAreExplicitlyMissing =
+      (fundingSourceDetails != null && Object.keys(fundingSourceDetails).length === 0) ||
+      detailsType === 'none';
+    const hasPaymentMethod =
+      normalizedFundingSource.length > 0 &&
+      normalizedFundingSource !== '0' &&
+      normalizedFundingSource.toLowerCase() !== 'null';
+    if (!hasPaymentMethod || detailsAreExplicitlyMissing) {
+      throw new PaymentMethodRequiredError(normalizedAdAccountId);
+    }
   }
 
   private mapBusinessPages(

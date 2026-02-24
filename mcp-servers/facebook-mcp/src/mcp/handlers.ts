@@ -9,6 +9,7 @@ import {
   CreateAdSetSchema,
   CreateCampaignSchema,
   AutofillDsaForAdAccountSchema,
+  GetDsaSettingsSchema,
   DuplicateAdSchema,
   DuplicateAdSetSchema,
   DuplicateCampaignSchema,
@@ -21,6 +22,7 @@ import {
   GetPromotablePagesSchema,
   ListTenantPagesSchema,
   PreflightCreateCampaignBundleSchema,
+  SetDsaSettingsSchema,
   SetDefaultPageForAdAccountSchema,
   SyncTenantAssetsSchema,
   UpdateAdSchema,
@@ -92,6 +94,14 @@ export class FacebookToolHandlers {
       case 'preflight_create_campaign_bundle': {
         const parsed = parseArgs(PreflightCreateCampaignBundleSchema, args);
         return this.facebookService.preflightCreateCampaignBundle(parsed);
+      }
+      case 'get_dsa_settings': {
+        const parsed = parseArgs(GetDsaSettingsSchema, args);
+        return this.facebookService.getDsaSettings(parsed);
+      }
+      case 'set_dsa_settings': {
+        const parsed = parseArgs(SetDsaSettingsSchema, args);
+        return this.facebookService.setDsaSettings(parsed);
       }
       case 'autofill_dsa_for_ad_account': {
         const parsed = parseArgs(AutofillDsaForAdAccountSchema, args);

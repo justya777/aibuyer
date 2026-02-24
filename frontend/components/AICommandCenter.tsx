@@ -17,8 +17,26 @@ interface AICommandCenterProps {
   selectedBusinessId?: string | null
   requiresDefaultPage?: boolean
   onNavigateToDefaultPage?: () => void
+  onNavigateToDsaSettings?: (adAccountId: string) => void
   onActionComplete: (action: AIAction) => void
 }
+
+type BlockingAction =
+  | {
+      type: 'OPEN_DSA_SETTINGS'
+      tenantId?: string
+      adAccountId?: string
+    }
+  | {
+      type: 'OPEN_DEFAULT_PAGE_SETTINGS'
+      tenantId?: string
+      adAccountId?: string
+    }
+  | {
+      type: 'RESOLVE_PAYMENT_METHOD'
+      tenantId?: string
+      adAccountId?: string
+    };
 
 export default function AICommandCenter({
   selectedAccount,
@@ -26,6 +44,7 @@ export default function AICommandCenter({
   selectedBusinessId,
   requiresDefaultPage = false,
   onNavigateToDefaultPage,
+  onNavigateToDsaSettings,
   onActionComplete,
 }: AICommandCenterProps) {
   const COMMAND_TIMEOUT_MS = 120000
@@ -33,6 +52,8 @@ export default function AICommandCenter({
   const [isProcessing, setIsProcessing] = useState(false)
   const [uploadedFiles, setUploadedFiles] = useState<any[]>([])
   const [showUploadZone, setShowUploadZone] = useState(false)
+  const [blockingMessage, setBlockingMessage] = useState<string | null>(null)
+  const [blockingAction, setBlockingAction] = useState<BlockingAction | null>(null)
   const [suggestions] = useState([
     // Campaign operations with targeting - Updated objectives
     'Create a leads campaign for Romanian men on romanian language aged 20-45 interested in investments with $15 daily budget with the link https://domain.com/test?utm_campaign={{campaign.name}}&utm_source={{site_source_name}}',
@@ -96,6 +117,8 @@ export default function AICommandCenter({
     e.preventDefault()
     if (!command.trim() || !selectedAccount || !selectedBusinessId) return
 
+    setBlockingMessage(null)
+    setBlockingAction(null)
     setIsProcessing(true)
 
     try {
@@ -121,6 +144,29 @@ export default function AICommandCenter({
 
       if (!response.ok) {
         const errorPayload = await response.json().catch(() => null)
+        const actionableCode = errorPayload?.code
+        if (typeof errorPayload?.message === 'string') {
+          setBlockingMessage(errorPayload.message)
+        }
+        if (
+          actionableCode === 'DSA_REQUIRED' &&
+          errorPayload?.action?.type === 'OPEN_DSA_SETTINGS'
+        ) {
+          setBlockingAction(errorPayload.action as BlockingAction)
+        } else if (
+          actionableCode === 'DEFAULT_PAGE_REQUIRED' &&
+          errorPayload?.action?.type === 'OPEN_DEFAULT_PAGE_SETTINGS'
+        ) {
+          setBlockingAction(errorPayload.action as BlockingAction)
+        } else if (actionableCode === 'PAYMENT_METHOD_REQUIRED') {
+          setBlockingAction({
+            type: 'RESOLVE_PAYMENT_METHOD',
+            tenantId: selectedTenantId || undefined,
+            adAccountId: selectedAccount.id,
+          })
+        } else {
+          setBlockingAction(null)
+        }
         const baseMessage =
           errorPayload?.message ||
           errorPayload?.error ||
@@ -137,6 +183,9 @@ export default function AICommandCenter({
       if (!result.success) {
         throw new Error(result.error || 'AI command failed')
       }
+
+      setBlockingMessage(null)
+      setBlockingAction(null)
 
       // Process all actions returned by the AI
       if (result.actions && result.actions.length > 0) {
@@ -246,6 +295,39 @@ export default function AICommandCenter({
           </div>
         </div>
       )}
+      {selectedBusinessId &&
+      selectedAccount &&
+      blockingAction?.type === 'RESOLVE_PAYMENT_METHOD' ? (
+        <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-md">
+          <p className="text-sm text-amber-800">
+            {blockingMessage ||
+              'A valid payment method is required for this ad account before creating ads.'}
+          </p>
+        </div>
+      ) : null}
+      {selectedBusinessId &&
+      selectedAccount &&
+      blockingAction?.type === 'OPEN_DSA_SETTINGS' ? (
+        <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-md">
+          <div className="flex items-start justify-between gap-3">
+            <p className="text-sm text-amber-800">
+              {blockingMessage ||
+                'DSA settings are required for EU-targeted campaigns on this ad account.'}
+            </p>
+            <button
+              type="button"
+              className="text-xs px-2 py-1 border border-amber-300 rounded text-amber-800 hover:bg-amber-100"
+              onClick={() =>
+                onNavigateToDsaSettings?.(
+                  blockingAction.adAccountId || selectedAccount.id
+                )
+              }
+            >
+              Open DSA settings
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       {/* {selectedAccount && (
         <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-md">
