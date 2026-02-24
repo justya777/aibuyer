@@ -2,15 +2,21 @@
 // Always use consistent formatting between server and client
 
 export const formatDate = (date: Date | string, locale = 'en-US'): string => {
-  return new Date(date).toLocaleDateString(locale);
+  const parsed = new Date(date);
+  if (Number.isNaN(parsed.getTime())) return '--/--/----';
+  return parsed.toLocaleDateString(locale);
 };
 
 export const formatTime = (date: Date | string, locale = 'en-US'): string => {
-  return new Date(date).toLocaleTimeString(locale);
+  const parsed = new Date(date);
+  if (Number.isNaN(parsed.getTime())) return '--:--:--';
+  return parsed.toLocaleTimeString(locale);
 };
 
 export const formatDateTime = (date: Date | string, locale = 'en-US'): string => {
-  return new Date(date).toLocaleString(locale);
+  const parsed = new Date(date);
+  if (Number.isNaN(parsed.getTime())) return '--';
+  return parsed.toLocaleString(locale);
 };
 
 // Safe date formatting that handles potential null/undefined values

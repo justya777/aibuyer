@@ -1,179 +1,182 @@
-'use client'
+'use client';
 
-import { AIAction } from '../../shared/types'
-import { 
-  ClockIcon,
+import clsx from 'clsx';
+import {
   CheckCircleIcon,
-  XCircleIcon,
-  ClipboardDocumentListIcon
-} from '@heroicons/react/24/outline'
-import clsx from 'clsx'
+  ClockIcon,
+  ExclamationCircleIcon,
+  ExclamationTriangleIcon,
+  InformationCircleIcon,
+  WrenchScrewdriverIcon,
+} from '@heroicons/react/24/outline';
+import type { ExecutionStep, ExecutionSummary } from '@/lib/shared-types';
+import { safeTimeFormat } from '@/lib/date-utils';
 
 interface AIActionLogProps {
-  actions: AIAction[]
+  steps: ExecutionStep[];
+  summary: ExecutionSummary | null;
+  showTechnicalDetails?: boolean;
 }
 
-export default function AIActionLog({ actions }: AIActionLogProps) {
-  const getActionTypeLabel = (type: AIAction['type']) => {
-    const labels = {
-      campaign_create: 'Campaign Created',
-      campaign_update: 'Campaign Updated',
-      campaign_pause: 'Campaign Paused',
-      campaign_delete: 'Campaign Deleted',
-      budget_adjust: 'Budget Adjusted',
-      targeting_update: 'Targeting Updated',
-      adset_create: 'Ad Set Created',
-      ad_create: 'Ad Created'
-    }
-    return labels[type] || type
-  }
-
-  const formatExecutionTime = (time?: number) => {
-    if (!time) return ''
-    if (time < 1000) return `${time}ms`
-    return `${(time / 1000).toFixed(1)}s`
-  }
-
+export default function AIActionLog({ steps, summary, showTechnicalDetails = false }: AIActionLogProps) {
   return (
     <div className="h-full flex flex-col">
       <div className="mb-4">
         <div className="flex items-center space-x-2 mb-2">
-          <ClipboardDocumentListIcon className="w-5 h-5 text-gray-600" />
-          <h3 className="text-lg font-semibold text-gray-900">AI Action Log</h3>
+          <ClockIcon className="w-5 h-5 text-gray-600" />
+          <h3 className="text-lg font-semibold text-gray-900">AI Execution Timeline</h3>
         </div>
         <p className="text-sm text-gray-600">
-          Track AI actions and decisions in real-time
+          Real-time step-by-step execution with readable status and errors
         </p>
       </div>
 
       <div className="flex-1 overflow-auto space-y-4">
-        {actions.length === 0 ? (
-          <div className="text-center py-8">
-            <ClipboardDocumentListIcon className="w-12 h-12 text-gray-300 mx-auto mb-3" />
-            <p className="text-gray-500">No actions yet</p>
+        {steps.length === 0 ? (
+          <div className="text-center py-8 border border-dashed border-gray-300 rounded-lg">
+            <InformationCircleIcon className="w-12 h-12 text-gray-300 mx-auto mb-3" />
+            <p className="text-gray-500">No execution timeline yet</p>
             <p className="text-sm text-gray-400 mt-1">
-              AI actions will appear here when commands are executed
+              Run a command to stream Campaign → Ad Set → Ad execution steps
             </p>
           </div>
         ) : (
-          actions.map((action) => (
-            <div
-              key={action.id}
-              className="bg-white border border-gray-200 rounded-lg p-4 hover:shadow-sm transition-shadow"
-            >
-              {/* Header */}
-              <div className="flex items-center justify-between mb-3">
-                <div className="flex items-center space-x-2">
-                  <div className={clsx(
-                    'w-2 h-2 rounded-full',
-                    action.result === 'success' && 'bg-green-500',
-                    action.result === 'error' && 'bg-red-500',
-                    action.result === 'pending' && 'bg-yellow-500'
-                  )}></div>
-                  <span className="text-sm font-medium text-gray-900">
-                    {getActionTypeLabel(action.type)}
-                  </span>
-                </div>
-                <div className="flex items-center space-x-1 text-xs text-gray-500">
-                  <ClockIcon className="w-3 h-3" />
-                  <span>
-                    {new Date(action.timestamp).toLocaleTimeString('en-US')}
-                  </span>
-                </div>
-              </div>
-
-              {/* Action Description */}
-              <div className="mb-3">
-                <p className="text-sm text-gray-700 mb-2">{action.action}</p>
-                <div className="bg-gray-50 rounded-md p-3">
-                  <p className="text-xs text-gray-600 font-medium mb-1">AI Reasoning:</p>
-                  <p className="text-xs text-gray-700">{action.reasoning}</p>
-                </div>
-              </div>
-
-              {/* Status and Details */}
-              <div className="flex items-center justify-between">
-                <div className="flex items-center space-x-4">
-                  <div className="flex items-center space-x-1">
-                    {action.success && (
-                      <CheckCircleIcon className="w-4 h-4 text-green-500" />
-                    )}
-                    {action.success === false && (
-                      <XCircleIcon className="w-4 h-4 text-red-500" />
-                    )}
-                    <span className={clsx(
-                      'text-xs font-medium',
-                      action.success && 'text-green-700',
-                      action.success === false && 'text-red-700'
-                    )}>
-                      {action.success ? 'SUCCESS' : 'ERROR'}
-                    </span>
+          steps
+            .slice()
+            .sort((a, b) => a.order - b.order || a.startedAt.localeCompare(b.startedAt))
+            .map((step) => (
+              <div
+                key={step.id}
+                className="bg-white border border-gray-200 rounded-lg p-4 hover:shadow-sm transition-shadow"
+              >
+                <div className="flex items-start justify-between gap-3 mb-3">
+                  <div>
+                    <p className="text-sm font-semibold text-gray-900">
+                      {step.order > 0 ? `Step ${step.order} — ${step.title}` : step.title}
+                    </p>
+                    <p className="text-xs text-gray-500 mt-1">
+                      {safeTimeFormat(step.startedAt)}
+                      {step.finishedAt ? ` → ${safeTimeFormat(step.finishedAt)}` : ''}
+                    </p>
                   </div>
-                  
-                  {action.executionTime && (
-                    <span className="text-xs text-gray-500">
-                      {formatExecutionTime(action.executionTime)}
-                    </span>
-                  )}
+                  <StepStatusBadge step={step} />
                 </div>
 
-                {action.campaignId && (
-                  <span className="text-xs text-gray-500 font-mono">
-                    {action.campaignId}
-                  </span>
+                <p className="text-sm text-gray-800">{step.summary}</p>
+
+                {step.userMessage ? (
+                  <p className="text-sm text-gray-600 mt-2">{step.userMessage}</p>
+                ) : null}
+
+                {step.fixesApplied && step.fixesApplied.length > 0 ? (
+                  <div className="mt-3 p-3 bg-amber-50 border border-amber-200 rounded-md">
+                    <p className="text-xs font-semibold text-amber-800 mb-2">Fixes Applied</p>
+                    <ul className="text-xs text-amber-900 space-y-1 list-disc list-inside">
+                      {step.fixesApplied.map((fix) => (
+                        <li key={fix}>{fix}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+
+                {showTechnicalDetails &&
+                (step.technicalDetails || (step.meta && Object.keys(step.meta).length > 0)) && (
+                  <details className="mt-3">
+                    <summary className="text-xs text-gray-500 cursor-pointer hover:text-gray-700">
+                      Technical details
+                    </summary>
+                    <div className="mt-2 p-3 bg-gray-50 rounded-md space-y-2">
+                      {step.technicalDetails ? (
+                        <p className="text-xs text-gray-700 whitespace-pre-wrap">
+                          {step.technicalDetails}
+                        </p>
+                      ) : null}
+                      {step.meta && Object.keys(step.meta).length > 0 ? (
+                        <pre className="text-xs text-gray-600 whitespace-pre-wrap">
+                          {JSON.stringify(step.meta, null, 2)}
+                        </pre>
+                      ) : null}
+                    </div>
+                  </details>
                 )}
               </div>
-
-              {/* Error Message */}
-              {action.result === 'error' && action.errorMessage && (
-                <div className="mt-3 p-2 bg-red-50 border border-red-200 rounded-md">
-                  <p className="text-xs text-red-700">
-                    <strong>Error:</strong> {action.errorMessage}
-                  </p>
-                </div>
-              )}
-
-              {/* Parameters (collapsible) */}
-              {action.parameters && Object.keys(action.parameters).length > 0 && (
-                <details className="mt-3">
-                  <summary className="text-xs text-gray-500 cursor-pointer hover:text-gray-700">
-                    View Parameters
-                  </summary>
-                  <div className="mt-2 p-2 bg-gray-50 rounded-md">
-                    <pre className="text-xs text-gray-600 whitespace-pre-wrap">
-                      {JSON.stringify(action.parameters, null, 2)}
-                    </pre>
-                  </div>
-                </details>
-              )}
-            </div>
-          ))
+            ))
         )}
       </div>
 
-      {/* Footer Stats */}
-      {actions.length > 0 && (
+      {(summary || steps.length > 0) && (
         <div className="mt-4 pt-4 border-t border-gray-200">
           <div className="grid grid-cols-3 gap-4 text-center">
             <div>
-              <p className="text-xs text-gray-500">Total Actions</p>
-              <p className="text-sm font-semibold">{actions.length}</p>
-            </div>
-            <div>
-              <p className="text-xs text-gray-500">Success Rate</p>
+              <p className="text-xs text-gray-500">Steps Completed</p>
               <p className="text-sm font-semibold">
-                {((actions.filter(a => a.result === 'success').length / actions.length) * 100).toFixed(0)}%
+                {summary ? `${summary.stepsCompleted} / ${summary.totalSteps}` : '-'}
               </p>
             </div>
             <div>
-              <p className="text-xs text-gray-500">Last Action</p>
-              <p className="text-sm font-semibold">
-                {actions.length > 0 ? new Date(actions[0].timestamp).toLocaleTimeString('en-US') : '-'}
+              <p className="text-xs text-gray-500">Retries</p>
+              <p className="text-sm font-semibold">{summary ? summary.retries : 0}</p>
+            </div>
+            <div>
+              <p className="text-xs text-gray-500">Final Status</p>
+              <p
+                className={clsx(
+                  'text-sm font-semibold',
+                  summary?.finalStatus === 'success' && 'text-green-700',
+                  summary?.finalStatus === 'partial' && 'text-amber-700',
+                  summary?.finalStatus === 'error' && 'text-red-700'
+                )}
+              >
+                {summary ? summary.finalStatus.toUpperCase() : 'RUNNING'}
               </p>
             </div>
           </div>
+          {summary?.finalMessage ? (
+            <p className="text-xs text-gray-600 mt-3">{summary.finalMessage}</p>
+          ) : null}
         </div>
       )}
     </div>
-  )
+  );
+}
+
+function StepStatusBadge({ step }: { step: ExecutionStep }) {
+  if (step.status === 'success') {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs bg-green-50 text-green-700 border border-green-200">
+        <CheckCircleIcon className="w-4 h-4" />
+        Success
+      </span>
+    );
+  }
+  if (step.status === 'retrying') {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs bg-amber-50 text-amber-700 border border-amber-200">
+        <WrenchScrewdriverIcon className="w-4 h-4" />
+        Retrying ({step.attempts || 1})
+      </span>
+    );
+  }
+  if (step.status === 'error') {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs bg-red-50 text-red-700 border border-red-200">
+        <ExclamationCircleIcon className="w-4 h-4" />
+        Error
+      </span>
+    );
+  }
+  if (step.status === 'warning') {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs bg-amber-50 text-amber-700 border border-amber-200">
+        <ExclamationTriangleIcon className="w-4 h-4" />
+        Warning
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs bg-blue-50 text-blue-700 border border-blue-200">
+      <ClockIcon className="w-4 h-4" />
+      Running
+    </span>
+  );
 }

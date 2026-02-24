@@ -15,6 +15,8 @@ import type {
   GetAccountsParams,
   GetAdSetsParams,
   GetAdsParams,
+  GetDsaAutofillSuggestionsParams,
+  DsaAutofillSuggestionsResult,
   GetCampaignsParams,
   GetInsightsParams,
   GetDsaSettingsParams,
@@ -419,6 +421,48 @@ export class FacebookServiceFacade {
       updatedAt: settings.dsaUpdatedAt,
       configured: Boolean(settings.dsaBeneficiary && settings.dsaPayor),
     };
+  }
+
+  async getDsaAutofillSuggestions(
+    params: GetDsaAutofillSuggestionsParams
+  ): Promise<DsaAutofillSuggestionsResult> {
+    const actor = await this.requireActor(params, 'get_dsa_autofill_suggestions');
+    const normalizedAdAccountId = normalizeAdAccountId(params.adAccountId);
+    await this.tenantRegistry.assertAdAccountAllowed(
+      actor.tenantId,
+      normalizedAdAccountId,
+      actor.userId,
+      actor.isPlatformAdmin
+    );
+
+    const mapping = await prisma.tenantAdAccount.findUnique({
+      where: {
+        tenantId_adAccountId: {
+          tenantId: actor.tenantId,
+          adAccountId: normalizedAdAccountId,
+        },
+      },
+      select: { businessId: true },
+    });
+    if (!mapping) {
+      throw new TenantIsolationError(`Ad account ${normalizedAdAccountId} is not mapped to tenant ${actor.tenantId}.`);
+    }
+    if (mapping.businessId !== params.businessId) {
+      throw new TenantIsolationError(
+        `Ad account ${normalizedAdAccountId} is not mapped to business ${params.businessId}.`
+      );
+    }
+
+    return this.dsaService.getDsaAutofillSuggestions(
+      this.buildContext(actor, {
+        adAccountId: normalizedAdAccountId,
+      }),
+      {
+        businessId: params.businessId,
+        adAccountId: normalizedAdAccountId,
+        pageId: params.pageId,
+      }
+    );
   }
 
   async updateCampaign(params: UpdateCampaignParams): Promise<MutationWithWarnings<FacebookCampaign>> {

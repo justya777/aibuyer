@@ -23,6 +23,16 @@ function mapAdStatus(status: string): 'active' | 'paused' | 'deleted' {
 }
 
 function mapAd(record: Record<string, unknown>): FacebookAd {
+  const creative = (record.creative || {}) as Record<string, unknown>;
+  const storySpec =
+    creative.object_story_spec && typeof creative.object_story_spec === 'object'
+      ? (creative.object_story_spec as Record<string, unknown>)
+      : {};
+  const linkData =
+    storySpec.link_data && typeof storySpec.link_data === 'object'
+      ? (storySpec.link_data as Record<string, unknown>)
+      : {};
+
   return {
     id: String(record.id || ''),
     accountId: normalizeAdAccountId(String(record.account_id || '')),
@@ -30,7 +40,40 @@ function mapAd(record: Record<string, unknown>): FacebookAd {
     adSetId: String(record.adset_id || ''),
     name: String(record.name || ''),
     status: mapAdStatus(String(record.status || 'PAUSED')),
-    creative: {},
+    creative: {
+      pageId: typeof storySpec.page_id === 'string' ? storySpec.page_id : undefined,
+      title:
+        typeof creative.title === 'string'
+          ? creative.title
+          : typeof linkData.name === 'string'
+            ? linkData.name
+            : undefined,
+      body:
+        typeof creative.body === 'string'
+          ? creative.body
+          : typeof linkData.message === 'string'
+            ? linkData.message
+            : undefined,
+      imageUrl:
+        typeof creative.image_url === 'string'
+          ? creative.image_url
+          : typeof linkData.picture === 'string'
+            ? linkData.picture
+            : undefined,
+      videoUrl:
+        typeof creative.video_id === 'string'
+          ? creative.video_id
+          : typeof creative.video_url === 'string'
+            ? creative.video_url
+            : undefined,
+      linkUrl:
+        typeof creative.link_url === 'string'
+          ? creative.link_url
+          : typeof linkData.link === 'string'
+            ? linkData.link
+            : undefined,
+      displayLink: typeof linkData.caption === 'string' ? linkData.caption : undefined,
+    },
     performance: {
       spend: 0,
       impressions: 0,
@@ -72,7 +115,8 @@ export class AdsApi {
       path: `${parentId}/ads`,
       query: {
         limit: params.limit || 50,
-        fields: 'id,name,status,account_id,campaign_id,adset_id,created_time,updated_time',
+        fields:
+          'id,name,status,account_id,campaign_id,adset_id,created_time,updated_time,creative{id,title,body,image_url,video_id,link_url,object_story_spec}',
         effective_status: params.status?.join(','),
       },
     });
@@ -241,7 +285,8 @@ export class AdsApi {
       method: 'GET',
       path: adId,
       query: {
-        fields: 'id,name,status,account_id,campaign_id,adset_id,created_time,updated_time',
+        fields:
+          'id,name,status,account_id,campaign_id,adset_id,created_time,updated_time,creative{id,title,body,image_url,video_id,link_url,object_story_spec}',
       },
     });
     return mapAd(response.data);

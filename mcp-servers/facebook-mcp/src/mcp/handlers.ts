@@ -9,6 +9,7 @@ import {
   CreateAdSetSchema,
   CreateCampaignSchema,
   AutofillDsaForAdAccountSchema,
+  GetDsaAutofillSuggestionsSchema,
   GetDsaSettingsSchema,
   DuplicateAdSchema,
   DuplicateAdSetSchema,
@@ -106,6 +107,10 @@ export class FacebookToolHandlers {
       case 'autofill_dsa_for_ad_account': {
         const parsed = parseArgs(AutofillDsaForAdAccountSchema, args);
         return this.facebookService.autofillDsaForAdAccount(parsed);
+      }
+      case 'get_dsa_autofill_suggestions': {
+        const parsed = parseArgs(GetDsaAutofillSuggestionsSchema, args);
+        return this.facebookService.getDsaAutofillSuggestions(parsed);
       }
       case 'update_campaign': {
         const parsed = parseArgs(UpdateCampaignSchema, args);

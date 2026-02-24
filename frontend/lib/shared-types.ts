@@ -1,1 +1,17 @@
-export type { AIAction, FacebookAccount } from '../../shared/types';
+export type {
+  AdAccountHealthIndicators,
+  AdAccountHierarchyAd,
+  AdAccountHierarchyAdSet,
+  AdAccountHierarchyCampaign,
+  AdAccountHierarchyPayload,
+  AdAccountQuickMetrics,
+  AIAction,
+  EntityPerformance,
+  ExecutionBlockingError,
+  ExecutionStep,
+  ExecutionStepStatus,
+  ExecutionSummary,
+  ExecutionStreamEvent,
+  FacebookAccount,
+  TargetingSnapshot,
+} from '../../shared/types';

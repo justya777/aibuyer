@@ -35,6 +35,50 @@ type DsaSettingsPayload = {
   configured: boolean;
 };
 
+type AutofillBeneficiarySource = 'BUSINESS_NAME' | 'PAGE_BUSINESS_NAME' | 'PAGE_NAME' | 'TENANT_FALLBACK';
+type AutofillPayerSource = 'AD_ACCOUNT_NAME' | 'BUSINESS_NAME' | 'TENANT_FALLBACK';
+type AutofillConfidence = 'HIGH' | 'MEDIUM' | 'LOW';
+
+type AutofillSuggestion<TSource extends string> = {
+  value: string;
+  source: TSource;
+  confidence: AutofillConfidence;
+  reasons: string[];
+};
+
+type DsaAutofillPayload = {
+  beneficiary: AutofillSuggestion<AutofillBeneficiarySource>;
+  payer: AutofillSuggestion<AutofillPayerSource>;
+};
+
+type DebugAiLogEntry = {
+  id: string;
+  timestamp: string;
+  action: string;
+  reasoning: string;
+  result: 'error';
+  errorMessage: string;
+};
+
+const BENEFICIARY_SOURCE_LABELS: Record<AutofillBeneficiarySource, string> = {
+  BUSINESS_NAME: 'Business Portfolio name',
+  PAGE_BUSINESS_NAME: 'Page business name',
+  PAGE_NAME: 'Page name',
+  TENANT_FALLBACK: 'Tenant fallback',
+};
+
+const PAYER_SOURCE_LABELS: Record<AutofillPayerSource, string> = {
+  AD_ACCOUNT_NAME: 'Ad Account name',
+  BUSINESS_NAME: 'Business Portfolio name',
+  TENANT_FALLBACK: 'Tenant fallback',
+};
+
+function humanizeConfidence(confidence: AutofillConfidence): string {
+  if (confidence === 'HIGH') return 'High';
+  if (confidence === 'MEDIUM') return 'Medium';
+  return 'Low';
+}
+
 export default function BusinessPortfolioDetailPage() {
   const params = useParams<{ tenantId: string; businessId: string }>();
   const searchParams = useSearchParams();
@@ -53,11 +97,16 @@ export default function BusinessPortfolioDetailPage() {
   const [dsaPayorInput, setDsaPayorInput] = useState('');
   const [dsaSource, setDsaSource] = useState<string | null>(null);
   const [dsaUpdatedAt, setDsaUpdatedAt] = useState<string | null>(null);
+  const [autofillBeneficiary, setAutofillBeneficiary] = useState<
+    AutofillSuggestion<AutofillBeneficiarySource> | null
+  >(null);
+  const [autofillPayer, setAutofillPayer] = useState<AutofillSuggestion<AutofillPayerSource> | null>(null);
   const [dsaError, setDsaError] = useState<string | null>(null);
   const [isSavingDsa, setIsSavingDsa] = useState(false);
   const [isAutofillingDsa, setIsAutofillingDsa] = useState(false);
   const [isLoadingDsa, setIsLoadingDsa] = useState(false);
   const [handledOpenDsaAccountId, setHandledOpenDsaAccountId] = useState<string | null>(null);
+  const [debugAiLogs, setDebugAiLogs] = useState<DebugAiLogEntry[]>([]);
   const openDsaFor = searchParams.get('openDsaFor');
 
   const loadData = useCallback(async () => {
@@ -181,11 +230,30 @@ export default function BusinessPortfolioDetailPage() {
     }
   }
 
+  function appendDebugAiLog(errorMessage: string): void {
+    if (process.env.NODE_ENV !== 'development') {
+      return;
+    }
+    setDebugAiLogs((previous) => [
+      {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        timestamp: new Date().toISOString(),
+        action: 'DSA Autofill failed',
+        reasoning: 'Meta autofill request failed in BP DSA modal; user should fill values manually.',
+        result: 'error',
+        errorMessage,
+      },
+      ...previous,
+    ]);
+  }
+
   function setModalFromSettings(settings: DsaSettingsPayload): void {
     setDsaBeneficiaryInput(settings.dsaBeneficiary || '');
     setDsaPayorInput(settings.dsaPayor || '');
     setDsaSource(settings.dsaSource);
     setDsaUpdatedAt(settings.dsaUpdatedAt);
+    setAutofillBeneficiary(null);
+    setAutofillPayer(null);
   }
 
   async function fetchDsaSettings(adAccountId: string): Promise<DsaSettingsPayload> {
@@ -253,30 +321,40 @@ export default function BusinessPortfolioDetailPage() {
   }
 
   async function handleAutofillDsa(): Promise<void> {
-    if (!tenantId || !editingDsaAccountId) return;
+    if (!tenantId || !businessId || !editingDsaAccountId) return;
     setIsAutofillingDsa(true);
     setDsaError(null);
     try {
+      const defaultPageId = editingDsaAccount?.defaultPageId || undefined;
       const response = await fetch(
-        `/api/tenants/${tenantId}/ad-accounts/${encodeURIComponent(editingDsaAccountId)}/dsa/autofill`,
+        `/api/tenants/${tenantId}/businesses/${encodeURIComponent(
+          businessId
+        )}/ad-accounts/${encodeURIComponent(editingDsaAccountId)}/dsa/autofill`,
         {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'x-tenant-id': tenantId,
           },
+          body: JSON.stringify({
+            pageId: defaultPageId,
+          }),
         }
       );
       const payload = await response.json();
       if (!response.ok) {
-        throw new Error(payload.error || 'Failed to autofill DSA settings.');
+        throw new Error(payload.error || payload.message || 'Autofill failed.');
       }
-      if (payload.settings) {
-        setModalFromSettings(payload.settings as DsaSettingsPayload);
-      }
-      await loadData();
+
+      const suggestion = payload as DsaAutofillPayload;
+      setDsaBeneficiaryInput(suggestion.beneficiary.value || '');
+      setDsaPayorInput(suggestion.payer.value || '');
+      setAutofillBeneficiary(suggestion.beneficiary);
+      setAutofillPayer(suggestion.payer);
     } catch (autofillError) {
-      setDsaError(autofillError instanceof Error ? autofillError.message : 'Failed to autofill DSA settings.');
+      const details = autofillError instanceof Error ? autofillError.message : 'Autofill failed.';
+      appendDebugAiLog(details);
+      setDsaError('Unable to fetch data from Meta. Please fill manually.');
     } finally {
       setIsAutofillingDsa(false);
     }
@@ -533,6 +611,12 @@ export default function BusinessPortfolioDetailPage() {
                     onChange={(event) => setDsaBeneficiaryInput(event.target.value)}
                     required
                   />
+                  {autofillBeneficiary ? (
+                    <div className="mt-1 text-xs text-gray-500 space-y-0.5">
+                      <p>Source: {BENEFICIARY_SOURCE_LABELS[autofillBeneficiary.source]}</p>
+                      <p>Confidence: {humanizeConfidence(autofillBeneficiary.confidence)}</p>
+                    </div>
+                  ) : null}
                 </label>
                 <label className="block text-sm">
                   <span className="text-gray-700">Payor</span>
@@ -542,8 +626,27 @@ export default function BusinessPortfolioDetailPage() {
                     onChange={(event) => setDsaPayorInput(event.target.value)}
                     required
                   />
+                  {autofillPayer ? (
+                    <div className="mt-1 text-xs text-gray-500 space-y-0.5">
+                      <p>Source: {PAYER_SOURCE_LABELS[autofillPayer.source]}</p>
+                      <p>Confidence: {humanizeConfidence(autofillPayer.confidence)}</p>
+                    </div>
+                  ) : null}
                 </label>
               </>
+            ) : null}
+
+            {process.env.NODE_ENV === 'development' && debugAiLogs.length > 0 ? (
+              <div className="rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900 space-y-2">
+                <p className="font-medium">AI Debug Log (development only)</p>
+                {debugAiLogs.slice(0, 4).map((entry) => (
+                  <div key={entry.id} className="border-t border-amber-200 pt-1 first:border-t-0 first:pt-0">
+                    <p>{entry.action}</p>
+                    <p>{entry.reasoning}</p>
+                    <p className="text-amber-800">{entry.errorMessage}</p>
+                  </div>
+                ))}
+              </div>
             ) : null}
 
             <div className="flex justify-end gap-2 pt-2">
@@ -554,6 +657,8 @@ export default function BusinessPortfolioDetailPage() {
                 onClick={() => {
                   setEditingDsaAccountId(null);
                   setDsaError(null);
+                  setAutofillBeneficiary(null);
+                  setAutofillPayer(null);
                 }}
               >
                 Close

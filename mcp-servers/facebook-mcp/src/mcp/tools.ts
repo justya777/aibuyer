@@ -315,6 +315,14 @@ export const AutofillDsaForAdAccountSchema = z.object({
   adAccountId: z.string(),
 });
 
+export const GetDsaAutofillSuggestionsSchema = z.object({
+  tenantId: tenantIdRequired,
+  ...actorFields,
+  businessId: z.string(),
+  adAccountId: z.string(),
+  pageId: z.string().optional(),
+});
+
 export const GetDsaSettingsSchema = z.object({
   tenantId: tenantIdRequired,
   ...actorFields,
@@ -628,6 +636,20 @@ export const tools: Tool[] = [
     },
   },
   {
+    name: 'get_dsa_autofill_suggestions',
+    description: 'Get smart DSA beneficiary/payor suggestions from Business, Ad Account, and Page metadata',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tenantId: { type: 'string' },
+        businessId: { type: 'string' },
+        adAccountId: { type: 'string' },
+        pageId: { type: 'string' },
+      },
+      required: ['tenantId', 'businessId', 'adAccountId'],
+    },
+  },
+  {
     name: 'duplicate_campaign',
     description: 'Duplicate a campaign using Facebook native endpoint',
     inputSchema: {
@@ -702,6 +724,7 @@ export const toolSchemas = {
   get_dsa_settings: GetDsaSettingsSchema,
   set_dsa_settings: SetDsaSettingsSchema,
   autofill_dsa_for_ad_account: AutofillDsaForAdAccountSchema,
+  get_dsa_autofill_suggestions: GetDsaAutofillSuggestionsSchema,
   duplicate_campaign: DuplicateCampaignSchema,
   duplicate_adset: DuplicateAdSetSchema,
   duplicate_ad: DuplicateAdSchema,

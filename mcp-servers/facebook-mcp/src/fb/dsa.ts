@@ -1,9 +1,16 @@
 import { DsaSource, Prisma, type PrismaClient } from '@prisma/client';
 import { prisma } from '../db/prisma.js';
 import { logger } from '../utils/logger.js';
-import { GraphClient } from './core/graph-client.js';
+import { GraphApiError, GraphClient } from './core/graph-client.js';
 import { normalizeAdAccountId } from './core/tenant-registry.js';
 import type { RequestContext } from './core/types.js';
+import type {
+  DsaAutofillBeneficiarySource,
+  DsaAutofillConfidence,
+  DsaAutofillPayerSource,
+  DsaAutofillSuggestion,
+  DsaAutofillSuggestionsResult,
+} from '../types/facebook.js';
 
 const EU_COUNTRIES = new Set([
   'AT',
@@ -65,6 +72,43 @@ export class DsaComplianceError extends Error {
       'Retry the campaign workflow after DSA settings are saved.',
     ];
   }
+}
+
+export class DsaAutofillPermissionDeniedError extends Error {
+  readonly code = 'PERMISSION_DENIED';
+
+  constructor(message = 'Unable to fetch data from Meta due to missing permissions.') {
+    super(message);
+    this.name = 'DsaAutofillPermissionDeniedError';
+  }
+}
+
+interface DsaAutofillInput {
+  businessId: string;
+  adAccountId: string;
+  pageId?: string;
+}
+
+interface GraphBusinessNode {
+  id: string;
+  name: string;
+  verificationStatus?: string;
+}
+
+interface GraphAdAccountNode {
+  id: string;
+  name: string;
+  currency?: string;
+  timezoneName?: string;
+  businessId?: string;
+  businessName?: string;
+}
+
+interface GraphPageNode {
+  id: string;
+  name: string;
+  businessId?: string;
+  businessName?: string;
 }
 
 export function isEuTargeting(countries: string[]): boolean {
@@ -135,6 +179,110 @@ function parseRecommendations(data: unknown): { dsaBeneficiary: string; dsaPayor
   }
 
   return null;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function parseBusinessNode(value: unknown): GraphBusinessNode | null {
+  const record = asRecord(value);
+  if (!record) return null;
+  const id = normalizeString(record.id);
+  const name = normalizeString(record.name);
+  if (!id || !name) {
+    return null;
+  }
+  return {
+    id,
+    name,
+    verificationStatus: normalizeString(record.verification_status) || undefined,
+  };
+}
+
+function parseAdAccountNode(value: unknown): GraphAdAccountNode | null {
+  const record = asRecord(value);
+  if (!record) return null;
+  const id = normalizeString(record.id);
+  const accountId = normalizeString(record.account_id);
+  const normalizedId = id || (accountId ? normalizeAdAccountId(accountId) : null);
+  const name = normalizeString(record.name);
+  if (!normalizedId || !name) {
+    return null;
+  }
+  const business = asRecord(record.business);
+  return {
+    id: normalizedId,
+    name,
+    currency: normalizeString(record.currency) || undefined,
+    timezoneName: normalizeString(record.timezone_name) || undefined,
+    businessId: normalizeString(business?.id) || undefined,
+    businessName: normalizeString(business?.name) || undefined,
+  };
+}
+
+function parsePageNode(value: unknown): GraphPageNode | null {
+  const record = asRecord(value);
+  if (!record) return null;
+  const id = normalizeString(record.id);
+  const name = normalizeString(record.name);
+  if (!id || !name) {
+    return null;
+  }
+  const business = asRecord(record.business);
+  return {
+    id,
+    name,
+    businessId: normalizeString(business?.id) || undefined,
+    businessName: normalizeString(business?.name) || undefined,
+  };
+}
+
+function extractGraphErrorCode(error: GraphApiError): number | null {
+  const root = asRecord(error.data);
+  const graphError = asRecord(root?.error);
+  const code = graphError?.code;
+  return typeof code === 'number' ? code : null;
+}
+
+function extractGraphErrorMessage(error: GraphApiError): string {
+  const root = asRecord(error.data);
+  const graphError = asRecord(root?.error);
+  return (
+    normalizeString(graphError?.message) ||
+    normalizeString(error.message) ||
+    'Graph API request failed.'
+  );
+}
+
+function isPermissionDeniedGraphError(error: unknown): error is GraphApiError {
+  if (!(error instanceof GraphApiError)) return false;
+  if (error.status === 401 || error.status === 403) {
+    return true;
+  }
+  const code = extractGraphErrorCode(error);
+  return code === 10 || code === 190 || code === 200 || code === 294;
+}
+
+function isMissingObjectGraphError(error: unknown): error is GraphApiError {
+  if (!(error instanceof GraphApiError)) return false;
+  if (error.status === 404) {
+    return true;
+  }
+  const code = extractGraphErrorCode(error);
+  if (code === 100 || code === 803) {
+    return true;
+  }
+  return extractGraphErrorMessage(error).toLowerCase().includes('unsupported get request');
+}
+
+function isBusinessVerifiedStatus(value: string | undefined): boolean {
+  if (!value) return false;
+  const normalized = value.trim().toUpperCase();
+  return normalized.includes('VERIFIED') && !normalized.includes('NOT_VERIFIED');
 }
 
 function isMissingAdAccountSettingsTableError(error: unknown): boolean {
@@ -265,6 +413,73 @@ export class DsaService {
     };
   }
 
+  async getDsaAutofillSuggestions(
+    ctx: RequestContext,
+    input: DsaAutofillInput
+  ): Promise<DsaAutofillSuggestionsResult> {
+    const normalizedAdAccountId = normalizeAdAccountId(input.adAccountId);
+    const [business, adAccount, page, tenantFallback] = await Promise.all([
+      this.fetchBusinessMetadata(ctx, input.businessId),
+      this.fetchAdAccountMetadata(ctx, normalizedAdAccountId),
+      this.fetchPageMetadata(ctx, input.pageId),
+      this.buildAutomaticTenantFallback(ctx),
+    ]);
+    const tenantName = tenantFallback?.dsaBeneficiary || ctx.tenantId;
+    const businessAligned = Boolean(
+      business?.id &&
+        adAccount?.businessId &&
+        business.id === input.businessId &&
+        adAccount.businessId === input.businessId
+    );
+    const pageAligned = Boolean(page?.businessId && page.businessId === input.businessId);
+    const businessVerified = isBusinessVerifiedStatus(business?.verificationStatus);
+
+    const beneficiary = this.buildBeneficiarySuggestion({
+      business,
+      page,
+      tenantName,
+      businessAligned,
+      pageAligned,
+      businessVerified,
+    });
+    const payer = this.buildPayerSuggestion({
+      business,
+      adAccount,
+      tenantName,
+      businessAligned,
+      pageAligned,
+      businessVerified,
+    });
+
+    return {
+      beneficiary,
+      payer,
+      meta: {
+        business: business
+          ? {
+              id: business.id,
+              name: business.name,
+              verification_status: business.verificationStatus,
+            }
+          : undefined,
+        adAccount: adAccount
+          ? {
+              id: adAccount.id,
+              name: adAccount.name,
+              currency: adAccount.currency,
+              timezone_name: adAccount.timezoneName,
+            }
+          : undefined,
+        page: page
+          ? {
+              id: page.id,
+              name: page.name,
+            }
+          : undefined,
+      },
+    };
+  }
+
   private async persistDsaSettings(
     ctx: RequestContext,
     normalizedAdAccountId: string,
@@ -351,6 +566,256 @@ export class DsaService {
     return {
       dsaBeneficiary: tenantName,
       dsaPayor: tenantName,
+    };
+  }
+
+  private async fetchBusinessMetadata(
+    ctx: RequestContext,
+    businessId: string
+  ): Promise<GraphBusinessNode | null> {
+    try {
+      const response = await this.graphClient.request<Record<string, unknown>>(ctx, {
+        method: 'GET',
+        path: businessId,
+        query: {
+          fields: 'id,name,verification_status',
+        },
+      });
+      return parseBusinessNode(response.data);
+    } catch (error) {
+      if (isPermissionDeniedGraphError(error)) {
+        throw new DsaAutofillPermissionDeniedError(extractGraphErrorMessage(error));
+      }
+      if (isMissingObjectGraphError(error)) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  private async fetchAdAccountMetadata(
+    ctx: RequestContext,
+    adAccountId: string
+  ): Promise<GraphAdAccountNode | null> {
+    try {
+      const response = await this.graphClient.request<Record<string, unknown>>(ctx, {
+        method: 'GET',
+        path: adAccountId,
+        query: {
+          fields: 'id,name,account_id,currency,timezone_name,business{id,name}',
+        },
+      });
+      return parseAdAccountNode(response.data);
+    } catch (error) {
+      if (isPermissionDeniedGraphError(error)) {
+        throw new DsaAutofillPermissionDeniedError(extractGraphErrorMessage(error));
+      }
+      if (isMissingObjectGraphError(error)) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  private async fetchPageMetadata(
+    ctx: RequestContext,
+    pageId: string | undefined
+  ): Promise<GraphPageNode | null> {
+    if (!pageId) {
+      return null;
+    }
+    const normalizedPageId = pageId.trim();
+    if (!normalizedPageId) {
+      return null;
+    }
+
+    const mappedPage = await this.dbClient.tenantPage.findUnique({
+      where: {
+        tenantId_pageId: {
+          tenantId: ctx.tenantId,
+          pageId: normalizedPageId,
+        },
+      },
+      select: { pageId: true },
+    });
+    if (!mappedPage) {
+      logger.info('Skipping DSA autofill page lookup because page is not mapped to tenant', {
+        tenantId: ctx.tenantId,
+        pageId: normalizedPageId,
+      });
+      return null;
+    }
+
+    try {
+      const response = await this.graphClient.request<Record<string, unknown>>(ctx, {
+        method: 'GET',
+        path: normalizedPageId,
+        query: {
+          fields: 'id,name,business{id,name}',
+        },
+      });
+      return parsePageNode(response.data);
+    } catch (error) {
+      if (isPermissionDeniedGraphError(error)) {
+        throw new DsaAutofillPermissionDeniedError(extractGraphErrorMessage(error));
+      }
+      if (isMissingObjectGraphError(error)) {
+        logger.info('Ignoring missing page metadata during DSA autofill', {
+          tenantId: ctx.tenantId,
+          pageId: normalizedPageId,
+        });
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  private resolveConfidence(
+    fallbackUsed: boolean,
+    businessAligned: boolean,
+    pageAligned: boolean,
+    businessVerified: boolean
+  ): DsaAutofillConfidence {
+    if (fallbackUsed) {
+      return 'LOW';
+    }
+    if (businessAligned || businessVerified) {
+      return 'HIGH';
+    }
+    if (pageAligned) {
+      return 'MEDIUM';
+    }
+    return 'MEDIUM';
+  }
+
+  private appendConfidenceReason(
+    reasons: string[],
+    confidence: DsaAutofillConfidence,
+    options: { businessAligned: boolean; pageAligned: boolean; businessVerified: boolean; fallbackUsed: boolean }
+  ): void {
+    if (confidence === 'HIGH') {
+      if (options.businessAligned) {
+        reasons.push('Ad account business matches the selected Business Portfolio.');
+      }
+      if (options.businessVerified) {
+        reasons.push('Business Portfolio is verified in Meta.');
+      }
+      if (!options.businessAligned && !options.businessVerified) {
+        reasons.push('Meta business identity data is strongly aligned.');
+      }
+      return;
+    }
+
+    if (confidence === 'MEDIUM') {
+      if (options.pageAligned) {
+        reasons.push('Default Page is associated with the selected Business Portfolio.');
+      } else {
+        reasons.push('Meta metadata is partially available, but ownership alignment is incomplete.');
+      }
+      return;
+    }
+
+    if (options.fallbackUsed) {
+      reasons.push('Used tenant fallback because Meta metadata was unavailable.');
+    } else {
+      reasons.push('Confidence is low due to limited metadata alignment.');
+    }
+  }
+
+  private buildBeneficiarySuggestion(input: {
+    business: GraphBusinessNode | null;
+    page: GraphPageNode | null;
+    tenantName: string;
+    businessAligned: boolean;
+    pageAligned: boolean;
+    businessVerified: boolean;
+  }): DsaAutofillSuggestion<DsaAutofillBeneficiarySource> {
+    let value = input.tenantName;
+    let source: DsaAutofillBeneficiarySource = 'TENANT_FALLBACK';
+    const reasons: string[] = [];
+
+    if (input.business?.name) {
+      value = input.business.name;
+      source = 'BUSINESS_NAME';
+      reasons.push('Used Business Portfolio name from Meta.');
+    } else if (
+      input.page?.businessName &&
+      (!input.business?.name || input.page.businessName.toLowerCase() !== input.business.name.toLowerCase())
+    ) {
+      value = input.page.businessName;
+      source = 'PAGE_BUSINESS_NAME';
+      reasons.push('Used Page owner business name from Meta.');
+    } else if (input.page?.name) {
+      value = input.page.name;
+      source = 'PAGE_NAME';
+      reasons.push('Used default Page name from Meta.');
+    } else {
+      reasons.push('No Business or Page identity metadata was available.');
+    }
+
+    const confidence = this.resolveConfidence(
+      source === 'TENANT_FALLBACK',
+      input.businessAligned,
+      input.pageAligned,
+      input.businessVerified
+    );
+    this.appendConfidenceReason(reasons, confidence, {
+      businessAligned: input.businessAligned,
+      pageAligned: input.pageAligned,
+      businessVerified: input.businessVerified,
+      fallbackUsed: source === 'TENANT_FALLBACK',
+    });
+
+    return {
+      value,
+      source,
+      confidence,
+      reasons,
+    };
+  }
+
+  private buildPayerSuggestion(input: {
+    business: GraphBusinessNode | null;
+    adAccount: GraphAdAccountNode | null;
+    tenantName: string;
+    businessAligned: boolean;
+    pageAligned: boolean;
+    businessVerified: boolean;
+  }): DsaAutofillSuggestion<DsaAutofillPayerSource> {
+    let value = input.tenantName;
+    let source: DsaAutofillPayerSource = 'TENANT_FALLBACK';
+    const reasons: string[] = [];
+
+    if (input.adAccount?.name) {
+      value = input.adAccount.name;
+      source = 'AD_ACCOUNT_NAME';
+      reasons.push('Used Ad Account name from Meta.');
+    } else if (input.business?.name) {
+      value = input.business.name;
+      source = 'BUSINESS_NAME';
+      reasons.push('Used Business Portfolio name from Meta.');
+    } else {
+      reasons.push('No Ad Account or Business identity metadata was available.');
+    }
+
+    const confidence = this.resolveConfidence(
+      source === 'TENANT_FALLBACK',
+      input.businessAligned,
+      input.pageAligned,
+      input.businessVerified
+    );
+    this.appendConfidenceReason(reasons, confidence, {
+      businessAligned: input.businessAligned,
+      pageAligned: input.pageAligned,
+      businessVerified: input.businessVerified,
+      fallbackUsed: source === 'TENANT_FALLBACK',
+    });
+
+    return {
+      value,
+      source,
+      confidence,
+      reasons,
     };
   }
 }

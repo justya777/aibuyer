@@ -2,7 +2,7 @@
 
 import { useState, useRef, useCallback } from 'react'
 import { useDropzone } from 'react-dropzone'
-import { FacebookAccount, AIAction, AICommand } from '../../shared/types'
+import type { ExecutionStep, ExecutionSummary, FacebookAccount } from '@/lib/shared-types'
 import { 
   PaperAirplaneIcon,
   SparklesIcon,
@@ -16,9 +16,22 @@ interface AICommandCenterProps {
   selectedTenantId?: string | null
   selectedBusinessId?: string | null
   requiresDefaultPage?: boolean
+  accountContext?: {
+    defaultPageId: string | null
+    dsaConfigured: boolean
+    health?: {
+      billingOk: boolean
+      dsaOk: boolean
+      pageConnected: boolean
+    }
+  }
+  executionSteps?: ExecutionStep[]
+  executionSummary?: ExecutionSummary | null
   onNavigateToDefaultPage?: () => void
   onNavigateToDsaSettings?: (adAccountId: string) => void
-  onActionComplete: (action: AIAction) => void
+  onExecutionReset: () => void
+  onStepUpdate: (step: ExecutionStep) => void
+  onSummary: (summary: ExecutionSummary) => void
 }
 
 type BlockingAction =
@@ -43,9 +56,14 @@ export default function AICommandCenter({
   selectedTenantId,
   selectedBusinessId,
   requiresDefaultPage = false,
+  accountContext,
+  executionSteps = [],
+  executionSummary = null,
   onNavigateToDefaultPage,
   onNavigateToDsaSettings,
-  onActionComplete,
+  onExecutionReset,
+  onStepUpdate,
+  onSummary,
 }: AICommandCenterProps) {
   const COMMAND_TIMEOUT_MS = 120000
   const [command, setCommand] = useState('')
@@ -86,12 +104,11 @@ export default function AICommandCenter({
             ...result.material,
             file: file
           }]);
-          console.log(`✅ Uploaded: ${file.name}`);
         } else {
-          console.error(`❌ Upload failed for ${file.name}:`, result.error);
+          setBlockingMessage(`Material upload failed for ${file.name}.`);
         }
       } catch (error) {
-        console.error('❌ Upload error:', error);
+        setBlockingMessage(error instanceof Error ? error.message : 'Material upload failed.');
       }
     }
   }, [selectedAccount]);
@@ -117,29 +134,23 @@ export default function AICommandCenter({
     e.preventDefault()
     if (!command.trim() || !selectedAccount || !selectedBusinessId) return
 
+    onExecutionReset()
     setBlockingMessage(null)
     setBlockingAction(null)
     setIsProcessing(true)
 
     try {
-      const controller = new AbortController()
-      const timeout = setTimeout(() => controller.abort(), COMMAND_TIMEOUT_MS)
-
-      // Call the AI API endpoint
       const response = await fetch('/api/ai-command', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          ...(selectedTenantId ? { 'x-tenant-id': selectedTenantId } : {}),
         },
-        signal: controller.signal,
         body: JSON.stringify({
           command: command,
           accountId: selectedAccount.id,
-          tenantId: selectedTenantId || undefined,
           businessId: selectedBusinessId,
         }),
-      }).finally(() => {
-        clearTimeout(timeout)
       })
 
       if (!response.ok) {
@@ -178,39 +189,14 @@ export default function AICommandCenter({
         throw new Error(`${baseMessage}${nextSteps}`)
       }
 
-      const result = await response.json()
-
-      if (!result.success) {
-        throw new Error(result.error || 'AI command failed')
+      const result = await response.json().catch(() => null)
+      if (!result?.success || !result?.executionId) {
+        throw new Error(result?.error || 'Failed to start execution stream.')
       }
 
       setBlockingMessage(null)
       setBlockingAction(null)
-
-      // Process all actions returned by the AI
-      if (result.actions && result.actions.length > 0) {
-        result.actions.forEach((action: AIAction) => {
-          onActionComplete(action)
-        })
-      } else {
-        // If no actions, create a general response action
-        const responseAction: AIAction = {
-          id: Date.now().toString(),
-          timestamp: new Date(),
-          type: 'campaign_create',
-          accountId: selectedAccount.id,
-          action: `AI Response: ${result.message || 'Command processed'}`,
-          reasoning: result.reasoning || 'AI processed your command',
-          parameters: {
-            command: command,
-            accountId: selectedAccount.id,
-          },
-          result: 'success',
-          executionTime: 1500
-        }
-        onActionComplete(responseAction)
-      }
-
+      await consumeExecutionStream(result.executionId)
       setCommand('')
     } catch (error) {
       const displayError =
@@ -220,28 +206,95 @@ export default function AICommandCenter({
             ? error.message
             : 'Unknown error occurred'
 
-      console.error('Error processing AI command:', error)
-      
-      // Create error action
-      const errorAction: AIAction = {
-        id: Date.now().toString(),
-        timestamp: new Date(),
-        type: 'campaign_create',
-        accountId: selectedAccount.id,
-        action: `Failed to process command: "${command}"`,
-        reasoning: `Error occurred while processing your request: ${displayError}`,
-        parameters: {
-          command: command,
-          accountId: selectedAccount.id,
-        },
-        result: 'error',
-        errorMessage: displayError,
-        executionTime: 800
-      }
-      onActionComplete(errorAction)
+      setBlockingMessage(displayError)
+      onSummary({
+        stepsCompleted: 0,
+        totalSteps: 3,
+        retries: 0,
+        finalStatus: 'error',
+        finalMessage: displayError,
+      })
     } finally {
       setIsProcessing(false)
     }
+  }
+
+  const consumeExecutionStream = async (executionId: string) => {
+    await new Promise<void>((resolve, reject) => {
+      const source = new EventSource(`/api/ai-command/stream?executionId=${encodeURIComponent(executionId)}`)
+
+      source.addEventListener('step_update', (event) => {
+        try {
+          const payload = JSON.parse((event as MessageEvent).data)
+          if (payload?.type === 'step_update' && payload.step) {
+            onStepUpdate(payload.step)
+          }
+        } catch (parseError) {
+          setBlockingMessage('Step update stream parse error.')
+        }
+      })
+
+      source.addEventListener('execution_summary', (event) => {
+        try {
+          const payload = JSON.parse((event as MessageEvent).data)
+          if (payload?.type === 'execution_summary' && payload.summary) {
+            onSummary(payload.summary)
+          }
+        } catch (parseError) {
+          setBlockingMessage('Execution summary stream parse error.')
+        }
+      })
+
+      source.addEventListener('execution_error', (event) => {
+        try {
+          const payload = JSON.parse((event as MessageEvent).data)
+          const errorData = payload?.error || {}
+          const message = typeof errorData?.message === 'string' ? errorData.message : 'Execution failed.'
+          setBlockingMessage(message)
+
+          if (
+            errorData?.code === 'DSA_REQUIRED' &&
+            errorData?.action?.type === 'OPEN_DSA_SETTINGS'
+          ) {
+            setBlockingAction(errorData.action as BlockingAction)
+          } else if (
+            errorData?.code === 'DEFAULT_PAGE_REQUIRED' &&
+            errorData?.action?.type === 'OPEN_DEFAULT_PAGE_SETTINGS'
+          ) {
+            setBlockingAction(errorData.action as BlockingAction)
+          } else if (errorData?.code === 'PAYMENT_METHOD_REQUIRED') {
+            setBlockingAction({
+              type: 'RESOLVE_PAYMENT_METHOD',
+              tenantId: selectedTenantId || undefined,
+              adAccountId: selectedAccount?.id,
+            })
+          } else {
+            setBlockingAction(null)
+          }
+        } catch (parseError) {
+          setBlockingMessage('Execution error stream parse error.')
+        }
+      })
+
+      source.addEventListener('done', (event) => {
+        try {
+          const payload = JSON.parse((event as MessageEvent).data)
+          if (payload?.type === 'done' && payload.summary) {
+            onSummary(payload.summary)
+          }
+          source.close()
+          resolve()
+        } catch (parseError) {
+          source.close()
+          reject(parseError)
+        }
+      })
+
+      source.onerror = () => {
+        source.close()
+        reject(new Error('Execution stream disconnected unexpectedly.'))
+      }
+    })
   }
 
   const handleSuggestionClick = (suggestion: string) => {
@@ -256,10 +309,33 @@ export default function AICommandCenter({
           <SparklesIcon className="w-5 h-5 text-facebook-600" />
           <h3 className="text-lg font-semibold text-gray-900">AI Command Center</h3>
         </div>
-        {/* <p className="text-sm text-gray-600">
-          Give commands to the AI to manage your Facebook campaigns
-        </p> */}
+        {selectedAccount ? (
+          <div className="mt-2 rounded-md border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700">
+            <p>
+              <span className="font-semibold">Current account:</span> {selectedAccount.name}
+            </p>
+            <p>
+              <span className="font-semibold">Default page:</span> {accountContext?.defaultPageId || 'Not set'}
+            </p>
+            <p>
+              <span className="font-semibold">DSA:</span> {accountContext?.dsaConfigured ? 'Configured' : 'Missing'}
+            </p>
+            <div className="mt-2 flex flex-wrap gap-2">
+              <HealthChip label="Billing OK" ok={accountContext?.health?.billingOk ?? false} />
+              <HealthChip label="DSA OK" ok={accountContext?.health?.dsaOk ?? false} />
+              <HealthChip label="Page Connected" ok={accountContext?.health?.pageConnected ?? false} />
+            </div>
+          </div>
+        ) : null}
       </div>
+
+      {(isProcessing || executionSteps.length > 0 || Boolean(executionSummary)) && (
+        <ExecutionProgress
+          isProcessing={isProcessing}
+          steps={executionSteps}
+          summary={executionSummary}
+        />
+      )}
 
       {!selectedBusinessId && (
         <div className="mb-4 p-3 bg-yellow-50 border border-yellow-200 rounded-md">
@@ -329,20 +405,6 @@ export default function AICommandCenter({
         </div>
       ) : null}
 
-      {/* {selectedAccount && (
-        <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-md">
-          <p className="text-sm text-blue-700">
-            <strong>Selected Account:</strong> {selectedAccount.name}
-          </p>
-          <p className="text-xs text-blue-600 mt-1">
-            Budget: ${selectedAccount.metrics.budget.toLocaleString()} | 
-            Spend: ${selectedAccount.metrics.spend.toLocaleString()} | 
-            Active Campaigns: {selectedAccount.activeCampaigns}
-          </p>
-        </div>
-      )} */}
-
-      {/* File Upload Zone */}
       {showUploadZone && selectedAccount && (
         <div className="mb-4 p-4 border-2 border-dashed border-gray-300 rounded-lg bg-gray-50">
           <div {...getRootProps()} className={`cursor-pointer p-4 text-center rounded transition-colors ${
@@ -456,4 +518,47 @@ export default function AICommandCenter({
       )}
     </div>
   )
+}
+
+function HealthChip({ label, ok }: { label: string; ok: boolean }) {
+  return (
+    <span
+      className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ${
+        ok ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'
+      }`}
+    >
+      {label}: {ok ? 'Yes' : 'Needs attention'}
+    </span>
+  );
+}
+
+function ExecutionProgress({
+  isProcessing,
+  steps,
+  summary,
+}: {
+  isProcessing: boolean;
+  steps: ExecutionStep[];
+  summary: ExecutionSummary | null;
+}) {
+  const completed = summary?.stepsCompleted ?? steps.filter((step) => step.status === 'success').length;
+  const total = summary?.totalSteps ?? Math.max(steps.length, 1);
+  const percentage = Math.max(0, Math.min(100, Math.round((completed / total) * 100)));
+
+  return (
+    <div className="mb-4 rounded-md border border-blue-200 bg-blue-50 p-3">
+      <div className="mb-1 flex items-center justify-between text-xs text-blue-800">
+        <span>{isProcessing ? 'Execution in progress' : 'Execution result'}</span>
+        <span>
+          {completed}/{total}
+        </span>
+      </div>
+      <div className="h-2 w-full overflow-hidden rounded-full bg-blue-100">
+        <div
+          className="h-full rounded-full bg-blue-600 transition-all duration-300"
+          style={{ width: `${percentage}%` }}
+        />
+      </div>
+    </div>
+  );
 }

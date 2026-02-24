@@ -15,7 +15,7 @@ import { loadEnvConfig } from './config/env.js';
 import { FacebookToolHandlers } from './mcp/handlers.js';
 import { logger } from './utils/logger.js';
 import { TenantIsolationError } from './fb/core/types.js';
-import { DsaComplianceError } from './fb/dsa.js';
+import { DsaAutofillPermissionDeniedError, DsaComplianceError } from './fb/dsa.js';
 import { PageResolutionError } from './fb/core/page-resolution.js';
 import { PaymentMethodRequiredError } from './fb/accounts.js';
 
@@ -92,10 +92,11 @@ class FacebookMCPServer {
       } catch (error) {
         const isTenantIsolation = error instanceof TenantIsolationError;
         const isDsaCompliance = error instanceof DsaComplianceError;
+        const isDsaAutofillPermissionDenied = error instanceof DsaAutofillPermissionDeniedError;
         const isDefaultPageRequired = error instanceof PageResolutionError;
         const isPaymentMethodRequired = error instanceof PaymentMethodRequiredError;
         const statusCode =
-          isTenantIsolation
+          isTenantIsolation || isDsaAutofillPermissionDenied
             ? 403
             : isDsaCompliance || isDefaultPageRequired || isPaymentMethodRequired
               ? 422
@@ -111,13 +112,15 @@ class FacebookMCPServer {
           jsonrpc: '2.0',
           error: {
             code:
-              isTenantIsolation
+              isTenantIsolation || isDsaAutofillPermissionDenied
                 ? 403
                 : isDsaCompliance || isDefaultPageRequired || isPaymentMethodRequired
                   ? 422
                   : -32603,
             message: isTenantIsolation
               ? 'Forbidden'
+              : isDsaAutofillPermissionDenied
+                ? 'PERMISSION_DENIED'
               : isDsaCompliance
                 ? 'DSA_REQUIRED'
                 : isDefaultPageRequired
@@ -143,6 +146,13 @@ class FacebookMCPServer {
                         'Select and save a default page for this ad account.',
                         'Retry the campaign workflow.',
                       ],
+                      partial: false,
+                      success: false,
+                    }
+                : error instanceof DsaAutofillPermissionDeniedError
+                  ? {
+                      code: error.code,
+                      message: error.message,
                       partial: false,
                       success: false,
                     }

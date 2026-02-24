@@ -5,6 +5,7 @@ import { useParams } from 'next/navigation';
 
 type AdAccountDsaRow = {
   id: string;
+  businessId: string | null;
   adAccountId: string;
   createdAt: string;
   dsaBeneficiary: string | null;
@@ -21,6 +22,50 @@ type TenantPageRow = {
   confirmed: boolean;
 };
 
+type AutofillBeneficiarySource = 'BUSINESS_NAME' | 'PAGE_BUSINESS_NAME' | 'PAGE_NAME' | 'TENANT_FALLBACK';
+type AutofillPayerSource = 'AD_ACCOUNT_NAME' | 'BUSINESS_NAME' | 'TENANT_FALLBACK';
+type AutofillConfidence = 'HIGH' | 'MEDIUM' | 'LOW';
+
+type AutofillSuggestion<TSource extends string> = {
+  value: string;
+  source: TSource;
+  confidence: AutofillConfidence;
+  reasons: string[];
+};
+
+type DsaAutofillPayload = {
+  beneficiary: AutofillSuggestion<AutofillBeneficiarySource>;
+  payer: AutofillSuggestion<AutofillPayerSource>;
+};
+
+type DebugAiLogEntry = {
+  id: string;
+  timestamp: string;
+  action: string;
+  reasoning: string;
+  result: 'error';
+  errorMessage: string;
+};
+
+const BENEFICIARY_SOURCE_LABELS: Record<AutofillBeneficiarySource, string> = {
+  BUSINESS_NAME: 'Business Portfolio name',
+  PAGE_BUSINESS_NAME: 'Page business name',
+  PAGE_NAME: 'Page name',
+  TENANT_FALLBACK: 'Tenant fallback',
+};
+
+const PAYER_SOURCE_LABELS: Record<AutofillPayerSource, string> = {
+  AD_ACCOUNT_NAME: 'Ad Account name',
+  BUSINESS_NAME: 'Business Portfolio name',
+  TENANT_FALLBACK: 'Tenant fallback',
+};
+
+function humanizeConfidence(confidence: AutofillConfidence): string {
+  if (confidence === 'HIGH') return 'High';
+  if (confidence === 'MEDIUM') return 'Medium';
+  return 'Low';
+}
+
 export default function TenantDsaSettingsPage() {
   const params = useParams<{ tenantId: string }>();
   const tenantId = params.tenantId;
@@ -31,10 +76,15 @@ export default function TenantDsaSettingsPage() {
   const [editingRow, setEditingRow] = useState<AdAccountDsaRow | null>(null);
   const [beneficiaryInput, setBeneficiaryInput] = useState('');
   const [payorInput, setPayorInput] = useState('');
+  const [autofillBeneficiary, setAutofillBeneficiary] = useState<
+    AutofillSuggestion<AutofillBeneficiarySource> | null
+  >(null);
+  const [autofillPayer, setAutofillPayer] = useState<AutofillSuggestion<AutofillPayerSource> | null>(null);
   const [saving, setSaving] = useState(false);
   const [autofillingId, setAutofillingId] = useState<string | null>(null);
   const [syncingAssets, setSyncingAssets] = useState(false);
   const [defaultPageUpdatingFor, setDefaultPageUpdatingFor] = useState<string | null>(null);
+  const [debugAiLogs, setDebugAiLogs] = useState<DebugAiLogEntry[]>([]);
 
   const load = useCallback(async () => {
     if (!tenantId) return;
@@ -79,27 +129,64 @@ export default function TenantDsaSettingsPage() {
 
   const hasRows = useMemo(() => rows.length > 0, [rows]);
 
-  async function handleAutofill(adAccountId: string): Promise<void> {
+  function appendDebugAiLog(errorMessage: string): void {
+    if (process.env.NODE_ENV !== 'development') {
+      return;
+    }
+    setDebugAiLogs((previous) => [
+      {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        timestamp: new Date().toISOString(),
+        action: 'DSA Autofill failed',
+        reasoning: 'Meta autofill request failed in tenant DSA page; user should fill values manually.',
+        result: 'error',
+        errorMessage,
+      },
+      ...previous,
+    ]);
+  }
+
+  async function handleAutofill(row: AdAccountDsaRow): Promise<void> {
+    const adAccountId = row.adAccountId;
+    if (!row.businessId) {
+      const details = `Ad account ${adAccountId} is not mapped to a Business Portfolio.`;
+      appendDebugAiLog(details);
+      setError('Unable to fetch data from Meta. Please fill manually.');
+      return;
+    }
     setAutofillingId(adAccountId);
     setError(null);
     try {
       const response = await fetch(
-        `/api/tenants/${tenantId}/ad-accounts/${encodeURIComponent(adAccountId)}/dsa/autofill`,
+        `/api/tenants/${tenantId}/businesses/${encodeURIComponent(
+          row.businessId
+        )}/ad-accounts/${encodeURIComponent(adAccountId)}/dsa/autofill`,
         {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'x-tenant-id': tenantId,
           },
+          body: JSON.stringify({
+            pageId: row.defaultPageId || undefined,
+          }),
         }
       );
       const payload = await response.json();
       if (!response.ok) {
         throw new Error(payload.error || payload.message || 'Autofill failed.');
       }
-      await load();
+
+      const suggestion = payload as DsaAutofillPayload;
+      setEditingRow(row);
+      setBeneficiaryInput(suggestion.beneficiary.value || '');
+      setPayorInput(suggestion.payer.value || '');
+      setAutofillBeneficiary(suggestion.beneficiary);
+      setAutofillPayer(suggestion.payer);
     } catch (autofillError) {
-      setError(autofillError instanceof Error ? autofillError.message : 'Autofill failed.');
+      const details = autofillError instanceof Error ? autofillError.message : 'Autofill failed.';
+      appendDebugAiLog(details);
+      setError('Unable to fetch data from Meta. Please fill manually.');
     } finally {
       setAutofillingId(null);
     }
@@ -180,6 +267,8 @@ export default function TenantDsaSettingsPage() {
         throw new Error(payload.error || 'Failed to save DSA settings.');
       }
       setEditingRow(null);
+      setAutofillBeneficiary(null);
+      setAutofillPayer(null);
       await load();
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : 'Failed to save DSA settings.');
@@ -192,6 +281,8 @@ export default function TenantDsaSettingsPage() {
     setEditingRow(row);
     setBeneficiaryInput(row.dsaBeneficiary || '');
     setPayorInput(row.dsaPayor || '');
+    setAutofillBeneficiary(null);
+    setAutofillPayer(null);
   }
 
   return (
@@ -275,7 +366,7 @@ export default function TenantDsaSettingsPage() {
                           type="button"
                           className="px-2 py-1 text-xs border rounded border-blue-300 text-blue-700 hover:bg-blue-50"
                           disabled={autofillingId === row.adAccountId}
-                          onClick={() => handleAutofill(row.adAccountId)}
+                          onClick={() => void handleAutofill(row)}
                         >
                           {autofillingId === row.adAccountId ? 'Autofilling...' : 'Autofill from Meta'}
                         </button>
@@ -295,6 +386,19 @@ export default function TenantDsaSettingsPage() {
           </section>
         ) : null}
 
+        {process.env.NODE_ENV === 'development' && debugAiLogs.length > 0 ? (
+          <section className="bg-amber-50 border border-amber-200 rounded-lg p-4 space-y-2">
+            <h2 className="text-sm font-semibold text-amber-900">AI Debug Log (development only)</h2>
+            {debugAiLogs.slice(0, 6).map((entry) => (
+              <div key={entry.id} className="text-xs text-amber-900 border-t border-amber-200 pt-2 first:border-t-0 first:pt-0">
+                <p>{entry.action}</p>
+                <p>{entry.reasoning}</p>
+                <p className="text-amber-800">{entry.errorMessage}</p>
+              </div>
+            ))}
+          </section>
+        ) : null}
+
         {editingRow ? (
           <div className="fixed inset-0 bg-black/30 flex items-center justify-center p-4">
             <form
@@ -311,6 +415,12 @@ export default function TenantDsaSettingsPage() {
                   onChange={(event) => setBeneficiaryInput(event.target.value)}
                   required
                 />
+                {autofillBeneficiary ? (
+                  <div className="mt-1 text-xs text-gray-500 space-y-0.5">
+                    <p>Source: {BENEFICIARY_SOURCE_LABELS[autofillBeneficiary.source]}</p>
+                    <p>Confidence: {humanizeConfidence(autofillBeneficiary.confidence)}</p>
+                  </div>
+                ) : null}
               </label>
               <label className="block text-sm">
                 <span className="text-gray-700">Payor</span>
@@ -320,12 +430,22 @@ export default function TenantDsaSettingsPage() {
                   onChange={(event) => setPayorInput(event.target.value)}
                   required
                 />
+                {autofillPayer ? (
+                  <div className="mt-1 text-xs text-gray-500 space-y-0.5">
+                    <p>Source: {PAYER_SOURCE_LABELS[autofillPayer.source]}</p>
+                    <p>Confidence: {humanizeConfidence(autofillPayer.confidence)}</p>
+                  </div>
+                ) : null}
               </label>
               <div className="flex justify-end gap-2 pt-2">
                 <button
                   type="button"
                   className="px-3 py-1 text-sm border border-gray-300 rounded"
-                  onClick={() => setEditingRow(null)}
+                  onClick={() => {
+                    setEditingRow(null);
+                    setAutofillBeneficiary(null);
+                    setAutofillPayer(null);
+                  }}
                   disabled={saving}
                 >
                   Cancel

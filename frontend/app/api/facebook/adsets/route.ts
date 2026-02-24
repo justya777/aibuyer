@@ -30,11 +30,7 @@ export async function GET(request: NextRequest) {
 
     const rawAdSets = await mcpClient.callTool('get_adsets', params);
 
-    console.log(`Raw Facebook ad sets fetched:`, rawAdSets);
-
     const adSets = rawAdSets || [];
-
-    console.log(`Filtered ad sets:`, adSets);
 
     return NextResponse.json({
       success: true,

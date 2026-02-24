@@ -32,11 +32,7 @@ export async function GET(request: NextRequest) {
 
     const rawAds = await mcpClient.callTool('get_ads', params);
 
-    console.log(`Raw Facebook ads fetched:`, rawAds);
-
     const ads = rawAds || [];
-
-    console.log(`Filtered ads:`, ads);
 
     return NextResponse.json({
       success: true,

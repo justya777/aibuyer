@@ -26,8 +26,6 @@ export async function GET(request: NextRequest) {
       ]
     });
 
-    console.log('Facebook accounts fetched:', accounts);
-
     return NextResponse.json({
       success: true,
       accounts: accounts || [],

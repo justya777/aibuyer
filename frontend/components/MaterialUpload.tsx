@@ -57,14 +57,11 @@ export default function MaterialUpload({
           const newMaterial = result.material;
           setUploadedMaterials(prev => [...prev, newMaterial]);
           onUploadSuccess?.(newMaterial);
-          console.log(`✅ Uploaded: ${file.name}`);
         } else {
-          console.error(`❌ Upload failed for ${file.name}:`, result.error);
           onUploadError?.(result.error);
         }
       }
     } catch (error) {
-      console.error('❌ Upload error:', error);
       onUploadError?.(error instanceof Error ? error.message : 'Upload failed');
     } finally {
       setUploading(false);

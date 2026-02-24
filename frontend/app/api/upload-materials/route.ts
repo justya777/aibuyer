@@ -85,10 +85,6 @@ export async function POST(request: NextRequest) {
       tenantId: context.tenantId,
     };
 
-    console.log(`✅ Uploaded material: ${file.name} → ${uniqueFilename}`);
-    console.log(`📁 File saved to: ${filePath}`);
-    console.log(`🔗 Access URL: ${fileUrl}`);
-
     return NextResponse.json({
       success: true,
       material: materialInfo,
@@ -127,7 +123,6 @@ export async function GET(request: NextRequest) {
     });
 
   } catch (error) {
-    console.error('❌ Materials list error:', error);
     return NextResponse.json(
       { success: false, error: 'Failed to list materials' },
       { status: 500 }

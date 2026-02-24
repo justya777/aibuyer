@@ -28,8 +28,6 @@ export async function GET(request: NextRequest) {
       status: ['ACTIVE', 'PAUSED', 'CAMPAIGN_PAUSED', 'ADSET_PAUSED'],
     });
 
-    console.log(`Raw Facebook campaigns fetched for account ${normalizedAccountId}:`, rawCampaigns);
-
     // Keep only campaigns that come from the requested ad account and dedupe by ID.
     const campaigns = (Array.isArray(rawCampaigns) ? rawCampaigns : [])
       .filter((campaign) => {
@@ -42,8 +40,6 @@ export async function GET(request: NextRequest) {
         (campaign, index, all) =>
           all.findIndex((entry) => entry.id === campaign.id) === index
       );
-
-    console.log(`Filtered campaigns for account ${normalizedAccountId}:`, campaigns);
 
     return NextResponse.json(
       {

@@ -50,6 +50,7 @@ export async function GET(
         const adAccountSettings = settingsByAccountId.get(normalizedAdAccountId);
         return {
           id: asset.id,
+          businessId: asset.businessId || null,
           adAccountId: normalizedAdAccountId,
           name: asset.name || normalizedAdAccountId,
           status: asset.status || null,

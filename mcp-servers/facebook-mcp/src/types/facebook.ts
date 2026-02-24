@@ -354,6 +354,55 @@ export interface AutofillDsaParams extends TenantRequired {
   adAccountId: string;
 }
 
+export type DsaAutofillBeneficiarySource =
+  | 'BUSINESS_NAME'
+  | 'PAGE_BUSINESS_NAME'
+  | 'PAGE_NAME'
+  | 'TENANT_FALLBACK';
+export type DsaAutofillPayerSource = 'AD_ACCOUNT_NAME' | 'BUSINESS_NAME' | 'TENANT_FALLBACK';
+export type DsaAutofillConfidence = 'HIGH' | 'MEDIUM' | 'LOW';
+
+export interface DsaAutofillSuggestion<TSource extends string> {
+  value: string;
+  source: TSource;
+  confidence: DsaAutofillConfidence;
+  reasons: string[];
+}
+
+export interface DsaAutofillBusinessMeta {
+  id: string;
+  name: string;
+  verification_status?: string;
+}
+
+export interface DsaAutofillAdAccountMeta {
+  id: string;
+  name: string;
+  currency?: string;
+  timezone_name?: string;
+}
+
+export interface DsaAutofillPageMeta {
+  id: string;
+  name: string;
+}
+
+export interface GetDsaAutofillSuggestionsParams extends TenantRequired {
+  businessId: string;
+  adAccountId: string;
+  pageId?: string;
+}
+
+export interface DsaAutofillSuggestionsResult {
+  beneficiary: DsaAutofillSuggestion<DsaAutofillBeneficiarySource>;
+  payer: DsaAutofillSuggestion<DsaAutofillPayerSource>;
+  meta: {
+    business?: DsaAutofillBusinessMeta;
+    adAccount?: DsaAutofillAdAccountMeta;
+    page?: DsaAutofillPageMeta;
+  };
+}
+
 export interface GetDsaSettingsParams extends TenantRequired {
   adAccountId: string;
 }

@@ -104,6 +104,115 @@ export interface Campaign {
   updatedAt: Date;
 }
 
+export interface EntityPerformance {
+  spend: number;
+  impressions: number;
+  clicks: number;
+  ctr: number;
+  cpm: number;
+  cpc: number;
+  conversions: number;
+  costPerConversion: number;
+}
+
+export interface TargetingSnapshot {
+  countries: string[];
+  ageMin?: number;
+  ageMax?: number;
+  gender?: 'male' | 'female' | 'all';
+  interests: string[];
+  behaviors: string[];
+}
+
+export interface AdAccountHierarchyAd {
+  id: string;
+  campaignId: string;
+  adSetId: string;
+  name: string;
+  status: 'active' | 'paused' | 'deleted';
+  creative: {
+    title?: string;
+    body?: string;
+    imageUrl?: string;
+    videoUrl?: string;
+    linkUrl?: string;
+  };
+  performance: EntityPerformance;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AdAccountHierarchyAdSet {
+  id: string;
+  campaignId: string;
+  name: string;
+  status: 'active' | 'paused' | 'deleted';
+  optimizationGoal: string;
+  billingEvent: string;
+  budget: {
+    daily?: number;
+    lifetime?: number;
+    remaining: number;
+  };
+  targeting: TargetingSnapshot;
+  targetingSummary: string;
+  performance: EntityPerformance;
+  ads: AdAccountHierarchyAd[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AdAccountHierarchyCampaign {
+  id: string;
+  accountId: string;
+  name: string;
+  status: 'active' | 'paused' | 'deleted';
+  objective: string;
+  budget: {
+    daily?: number;
+    lifetime?: number;
+    remaining: number;
+  };
+  targeting: TargetingSnapshot;
+  targetingSummary: string;
+  performance: EntityPerformance;
+  adSets: AdAccountHierarchyAdSet[];
+  startDate?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AdAccountQuickMetrics {
+  spend7d: number;
+  ctr7d: number;
+  activeCampaigns: number;
+  activeAdSets: number;
+  activeAds: number;
+}
+
+export interface AdAccountHealthIndicators {
+  billingOk: boolean;
+  dsaOk: boolean;
+  pageConnected: boolean;
+}
+
+export interface AdAccountHierarchyPayload {
+  adAccount: {
+    adAccountId: string;
+    name: string;
+    status: string | null;
+    defaultPageId: string | null;
+    dsaBeneficiary: string | null;
+    dsaPayor: string | null;
+    dsaConfigured: boolean;
+  };
+  quickMetrics: AdAccountQuickMetrics;
+  health: AdAccountHealthIndicators;
+  campaigns: AdAccountHierarchyCampaign[];
+  adSets: AdAccountHierarchyAdSet[];
+  ads: AdAccountHierarchyAd[];
+}
+
 export interface AIAction {
   id: string;
   timestamp: Date;
@@ -118,6 +227,75 @@ export interface AIAction {
   errorMessage?: string;
   executionTime?: number;
 }
+
+export type ExecutionStepType = 'campaign' | 'adset' | 'ad' | 'validation' | 'error';
+
+export type ExecutionStepStatus =
+  | 'pending'
+  | 'running'
+  | 'success'
+  | 'error'
+  | 'retrying'
+  | 'warning';
+
+export interface ExecutionStep {
+  id: string;
+  order: number;
+  title: string;
+  type: ExecutionStepType;
+  status: ExecutionStepStatus;
+  summary: string;
+  userMessage?: string;
+  technicalDetails?: string;
+  fixesApplied?: string[];
+  attempts?: number;
+  meta?: Record<string, any>;
+  startedAt: string;
+  finishedAt?: string;
+}
+
+export interface ExecutionSummary {
+  stepsCompleted: number;
+  totalSteps: number;
+  retries: number;
+  finalStatus: 'success' | 'error' | 'partial';
+  finalMessage: string;
+}
+
+export interface ExecutionBlockingError {
+  code: 'DSA_REQUIRED' | 'DEFAULT_PAGE_REQUIRED' | 'PAYMENT_METHOD_REQUIRED';
+  message: string;
+  nextSteps: string[];
+  action?:
+    | {
+        type: 'OPEN_DSA_SETTINGS';
+        tenantId: string;
+        adAccountId: string;
+      }
+    | {
+        type: 'OPEN_DEFAULT_PAGE_SETTINGS';
+        tenantId: string;
+        adAccountId: string;
+      };
+}
+
+export type ExecutionStreamEvent =
+  | {
+      type: 'step_update';
+      step: ExecutionStep;
+    }
+  | {
+      type: 'execution_summary';
+      summary: ExecutionSummary;
+    }
+  | {
+      type: 'execution_error';
+      error: ExecutionBlockingError | { message: string };
+    }
+  | {
+      type: 'done';
+      summary: ExecutionSummary;
+    };
 
 export interface AICommand {
   id: string;
