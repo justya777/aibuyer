@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "AiRun" ADD COLUMN "summaryJson" JSONB;
+ALTER TABLE "AiRun" ADD COLUMN "retries" INTEGER NOT NULL DEFAULT 0;

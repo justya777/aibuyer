@@ -84,6 +84,19 @@ function isRetryableStatus(status: number): boolean {
   return status === 429 || (status >= 500 && status <= 599);
 }
 
+function isRateLimitErrorBody(data: unknown): boolean {
+  if (!data || typeof data !== 'object') return false;
+  const root = data as Record<string, unknown>;
+  const error = (root.error || {}) as Record<string, unknown>;
+  const code = typeof error.code === 'number' ? error.code : undefined;
+  const subcode = typeof error.error_subcode === 'number' ? error.error_subcode : undefined;
+  const message = typeof error.message === 'string' ? error.message.toLowerCase() : '';
+  if (code === 4 || code === 17 || code === 32) return true;
+  if (subcode === 2446079) return true;
+  if (message.includes('too many calls') || message.includes('too many api calls') || message.includes('user request limit reached')) return true;
+  return false;
+}
+
 function describeGraphError(status: number, data: unknown): string {
   if (!data || typeof data !== 'object') {
     return `Graph request failed with status ${status}`;
@@ -174,9 +187,9 @@ export class GraphClient {
           };
         }
 
-        const retryable = isRetryableStatus(response.status);
+        const retryable = isRetryableStatus(response.status) || isRateLimitErrorBody(response.data);
         if (retryable && attempt < maxAttempts) {
-          await this.backoff(attempt);
+          await this.backoff(attempt, ctx);
           continue;
         }
 
@@ -196,7 +209,7 @@ export class GraphClient {
         const retryable = status ? isRetryableStatus(status) : true;
 
         if (retryable && attempt < maxAttempts) {
-          await this.backoff(attempt);
+          await this.backoff(attempt, ctx);
           continue;
         }
 
@@ -218,10 +231,11 @@ export class GraphClient {
     });
   }
 
-  private async backoff(attempt: number): Promise<void> {
+  private async backoff(attempt: number, ctx?: RequestContext): Promise<void> {
     const exponentialDelay = this.retry.baseDelayMs * 2 ** (attempt - 1);
     const jitter = this.retry.jitterMs > 0 ? Math.floor(Math.random() * this.retry.jitterMs) : 0;
     const sleepTime = Math.min(exponentialDelay + jitter, this.retry.maxDelayMs);
+    logger.warn(`[RATE-LIMIT] account=${ctx?.adAccountId ?? 'unknown'} attempt=${attempt} waitMs=${sleepTime}`);
     await this.sleepFn(sleepTime);
   }
 

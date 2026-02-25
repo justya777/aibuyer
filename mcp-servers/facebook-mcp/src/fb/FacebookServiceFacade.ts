@@ -230,6 +230,27 @@ export class FacebookServiceFacade {
     return this.campaignsApi.getCampaigns(ctx, params);
   }
 
+  async getCampaignById(params: {
+    tenantId?: string;
+    userId?: string;
+    isPlatformAdmin?: boolean;
+    campaignId: string;
+  }): Promise<FacebookCampaign> {
+    const actor = await this.requireActor(params, 'get_campaign_by_id');
+    const baseCtx = this.buildContext(actor, { campaignId: params.campaignId });
+    const accountId = await this.campaignsApi.getCampaignAccountId(baseCtx, params.campaignId);
+    await this.tenantRegistry.assertAdAccountAllowed(
+      actor.tenantId,
+      accountId,
+      actor.userId,
+      actor.isPlatformAdmin
+    );
+    return this.campaignsApi.getCampaignById(
+      this.buildContext(actor, { adAccountId: accountId, campaignId: params.campaignId }),
+      params.campaignId
+    );
+  }
+
   async createCampaign(params: CreateCampaignParams): Promise<MutationWithWarnings<FacebookCampaign>> {
     const actor = await this.requireActor(params, 'create_campaign');
     await this.tenantRegistry.assertAdAccountAllowed(

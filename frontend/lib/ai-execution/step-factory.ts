@@ -14,10 +14,15 @@ type StepDescriptor = {
 
 type StepMutationInput = {
   summary: string;
+  userTitle?: string;
   userMessage?: string;
+  nextSteps?: string[];
+  rationale?: string;
   technicalDetails?: string;
   fixesApplied?: string[];
   meta?: Record<string, any>;
+  debug?: Record<string, any>;
+  createdIds?: Record<string, any>;
 };
 
 const DEFAULT_STEP_ORDERS: Record<ExecutionStepType, number> = {
@@ -116,8 +121,13 @@ export function markStepRetrying(
   if (!step) return null;
   step.status = 'retrying';
   step.summary = input.summary;
+  step.userTitle = input.userTitle;
   step.userMessage = input.userMessage;
+  step.nextSteps = input.nextSteps;
+  step.rationale = input.rationale;
   step.technicalDetails = input.technicalDetails;
+  step.debug = input.debug;
+  step.createdIds = input.createdIds;
   if (input.fixesApplied && input.fixesApplied.length > 0) {
     step.fixesApplied = uniqueText([...(step.fixesApplied || []), ...input.fixesApplied]);
   }
@@ -139,8 +149,13 @@ export function markStepSuccess(
   if (!step) return null;
   step.status = 'success';
   step.summary = input.summary;
+  step.userTitle = input.userTitle;
   step.userMessage = input.userMessage;
+  step.nextSteps = input.nextSteps;
+  step.rationale = input.rationale;
   step.technicalDetails = input.technicalDetails;
+  step.debug = input.debug;
+  step.createdIds = input.createdIds;
   if (input.fixesApplied && input.fixesApplied.length > 0) {
     step.fixesApplied = uniqueText([...(step.fixesApplied || []), ...input.fixesApplied]);
   }
@@ -163,8 +178,13 @@ export function markStepError(
   if (!step) return null;
   step.status = 'error';
   step.summary = input.summary;
+  step.userTitle = input.userTitle;
   step.userMessage = input.userMessage;
+  step.nextSteps = input.nextSteps;
+  step.rationale = input.rationale;
   step.technicalDetails = input.technicalDetails;
+  step.debug = input.debug;
+  step.createdIds = input.createdIds;
   if (input.fixesApplied && input.fixesApplied.length > 0) {
     step.fixesApplied = uniqueText([...(step.fixesApplied || []), ...input.fixesApplied]);
   }

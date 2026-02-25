@@ -3,7 +3,6 @@
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
-import AIActionLog from '@/components/AIActionLog';
 import AICommandCenter from '@/components/AICommandCenter';
 import CampaignRow from '@/components/ad-account/CampaignRow';
 import AdSetRow from '@/components/ad-account/AdSetRow';
@@ -25,10 +24,14 @@ export default function BusinessAdAccountDetailPage() {
   const actId = decodeURIComponent(params.actId || '');
 
   const [tab, setTab] = useState<AdAccountTab>('campaigns');
-  const [isCommandPanelCollapsed, setIsCommandPanelCollapsed] = useState(false);
   const [payload, setPayload] = useState<AdAccountHierarchyPayload | null>(null);
   const [executionSteps, setExecutionSteps] = useState<ExecutionStep[]>([]);
   const [executionSummary, setExecutionSummary] = useState<ExecutionSummary | null>(null);
+  const [createdSummary, setCreatedSummary] = useState<{
+    campaignId?: string;
+    adSetId?: string;
+    adId?: string;
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
@@ -68,6 +71,49 @@ export default function BusinessAdAccountDetailPage() {
       window.localStorage.setItem(`selectedBusinessId:${tenantId}`, businessId);
     }
   }, [tenantId, businessId]);
+
+
+  useEffect(() => {
+    if (!tenantId || !businessId || !actId) return;
+    if (executionSteps.length > 0 || executionSummary) return;
+    const run = async () => {
+      try {
+        const runsResponse = await fetch(
+          `/api/ai-command/runs?businessId=${encodeURIComponent(
+            businessId
+          )}&adAccountId=${encodeURIComponent(actId)}&limit=1`,
+          {
+            headers: { 'x-tenant-id': tenantId },
+            cache: 'no-store',
+          }
+        );
+        const runsPayload = await runsResponse.json();
+        if (!runsResponse.ok || !runsPayload.success || !Array.isArray(runsPayload.runs)) {
+          return;
+        }
+        const latestRun = runsPayload.runs[0];
+        if (!latestRun?.id) return;
+        const eventsResponse = await fetch(`/api/ai-command/runs/${latestRun.id}/events`, {
+          headers: { 'x-tenant-id': tenantId },
+          cache: 'no-store',
+        });
+        const eventsPayload = await eventsResponse.json();
+        if (!eventsResponse.ok || !eventsPayload.success || !Array.isArray(eventsPayload.events)) {
+          return;
+        }
+        const reconstructed = rehydrateTimeline(eventsPayload.events);
+        if (reconstructed.steps.length > 0) {
+          setExecutionSteps(reconstructed.steps);
+        }
+        if (reconstructed.summary) {
+          setExecutionSummary(reconstructed.summary);
+        }
+      } catch {
+        // Don't block page rendering when timeline history fetch fails.
+      }
+    };
+    void run();
+  }, [tenantId, businessId, actId, executionSteps.length, executionSummary]);
 
   const aiSelectedAccount: FacebookAccount | null = payload?.adAccount
     ? {
@@ -125,6 +171,29 @@ export default function BusinessAdAccountDetailPage() {
 
       {error ? <p className="text-sm text-red-600">{error}</p> : null}
       {isLoading ? <p className="text-sm text-gray-600">Loading ad account...</p> : null}
+      {createdSummary ? (
+        <div className="rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
+          <p className="font-medium">Created successfully</p>
+          <div className="mt-1 flex flex-wrap gap-2 text-xs">
+            {createdSummary.campaignId ? (
+              <Link
+                href={`/tenants/${tenantId}/businesses/${encodeURIComponent(
+                  businessId
+                )}/ad-accounts/${encodeURIComponent(actId)}/campaigns/${encodeURIComponent(
+                  createdSummary.campaignId
+                )}`}
+                className="underline"
+              >
+                Campaign {createdSummary.campaignId}
+              </Link>
+            ) : null}
+            {createdSummary.adSetId ? (
+              <span>Ad Set {createdSummary.adSetId}</span>
+            ) : null}
+            {createdSummary.adId ? <span>Ad {createdSummary.adId}</span> : null}
+          </div>
+        </div>
+      ) : null}
 
       {!isLoading && !payload ? (
         <p className="text-sm text-gray-600">Ad account not found in this Business Portfolio.</p>
@@ -233,71 +302,62 @@ export default function BusinessAdAccountDetailPage() {
           </section>
 
           <section className="flex min-h-0 flex-col overflow-auto rounded-lg border border-slate-200 bg-white p-4">
-            <div className="mb-3 flex items-center justify-between">
-              <h3 className="text-sm font-semibold text-slate-900">AI Command Panel</h3>
-              <button
-                type="button"
-                className="rounded border border-slate-300 px-2 py-1 text-xs text-slate-700 hover:bg-slate-50"
-                onClick={() => setIsCommandPanelCollapsed((prev) => !prev)}
-              >
-                {isCommandPanelCollapsed ? 'Expand' : 'Collapse'}
-              </button>
-            </div>
-
-            {isCommandPanelCollapsed ? (
-              <div className="rounded-lg border border-dashed border-slate-300 p-4 text-sm text-slate-600">
-                Command Center is collapsed. Expand to run commands.
-              </div>
-            ) : (
-              <>
-                <div className="min-h-0 flex-1 overflow-auto">
-                  <AICommandCenter
-                    selectedAccount={aiSelectedAccount}
-                    selectedTenantId={tenantId}
-                    selectedBusinessId={businessId}
-                    requiresDefaultPage={!payload.adAccount.defaultPageId}
-                    accountContext={{
-                      defaultPageId: payload.adAccount.defaultPageId,
-                      dsaConfigured: payload.adAccount.dsaConfigured,
-                      health: payload.health,
-                    }}
-                    executionSteps={executionSteps}
-                    executionSummary={executionSummary}
-                    onNavigateToDefaultPage={() => {
-                      window.location.href = `/tenants/${tenantId}/businesses/${encodeURIComponent(businessId)}`;
-                    }}
-                    onNavigateToDsaSettings={(adAccountId) => {
-                      window.location.href = `/tenants/${tenantId}/businesses/${encodeURIComponent(
-                        businessId
-                      )}?openDsaFor=${encodeURIComponent(adAccountId)}`;
-                    }}
-                    onExecutionReset={() => {
-                      setExecutionSteps([]);
-                      setExecutionSummary(null);
-                    }}
-                    onStepUpdate={(step) =>
-                      setExecutionSteps((prev) => {
-                        const existingIndex = prev.findIndex((item) => item.id === step.id);
-                        if (existingIndex >= 0) {
-                          const next = [...prev];
-                          next[existingIndex] = step;
-                          return next;
-                        }
-                        return [...prev, step];
-                      })
-                    }
-                    onSummary={(summary) => {
-                      setExecutionSummary(summary);
-                      setIsCommandPanelCollapsed(true);
-                    }}
-                  />
-                </div>
-
-                <div className="mt-4 min-h-0 flex-1 overflow-auto border-t border-slate-200 pt-4">
-                  <AIActionLog steps={executionSteps} summary={executionSummary} />
-                </div>
-              </>
-            )}
+            <AICommandCenter
+              selectedAccount={aiSelectedAccount}
+              selectedTenantId={tenantId}
+              selectedBusinessId={businessId}
+              requiresDefaultPage={!payload.adAccount.defaultPageId}
+              accountContext={{
+                defaultPageId: payload.adAccount.defaultPageId,
+                dsaConfigured: payload.adAccount.dsaConfigured,
+                health: payload.health,
+              }}
+              executionSteps={executionSteps}
+              executionSummary={executionSummary}
+              onNavigateToDefaultPage={() => {
+                window.location.href = `/tenants/${tenantId}/businesses/${encodeURIComponent(businessId)}`;
+              }}
+              onNavigateToDsaSettings={(adAccountId) => {
+                window.location.href = `/tenants/${tenantId}/businesses/${encodeURIComponent(
+                  businessId
+                )}?openDsaFor=${encodeURIComponent(adAccountId)}`;
+              }}
+              onExecutionReset={() => {
+                setExecutionSteps([]);
+                setExecutionSummary(null);
+                setCreatedSummary(null);
+              }}
+              onStepUpdate={(step) =>
+                setExecutionSteps((prev) => {
+                  const existingIndex = prev.findIndex((item) => item.id === step.id);
+                  if (existingIndex >= 0) {
+                    const next = [...prev];
+                    next[existingIndex] = step;
+                    return next;
+                  }
+                  return [...prev, step];
+                })
+              }
+              onSummary={(summary) => {
+                setExecutionSummary(summary);
+              }}
+              onExecutionComplete={(result) => {
+                const cId = result.createdIds?.campaignId;
+                const asId = result.createdIds?.adSetId || result.createdIds?.adSetIds?.[0];
+                const aId = result.createdIds?.adId || result.createdIds?.adIds?.[0];
+                setCreatedSummary(
+                  result.success && (cId || asId || aId)
+                    ? { campaignId: cId, adSetId: asId, adId: aId }
+                    : null
+                );
+                setTimeout(() => void load(), 2000);
+              }}
+              onCampaignCreated={(campaignId) => {
+                window.location.href = `/tenants/${tenantId}/businesses/${encodeURIComponent(
+                  businessId
+                )}/ad-accounts/${encodeURIComponent(actId)}/campaigns/${encodeURIComponent(campaignId)}`;
+              }}
+            />
           </section>
         </div>
       ) : null}
@@ -326,4 +386,64 @@ function TabButton({ label, selected, onClick }: { label: string; selected: bool
       {label}
     </button>
   );
+}
+
+function rehydrateTimeline(events: any[]): {
+  steps: ExecutionStep[];
+  summary: ExecutionSummary | null;
+} {
+  const byStepId = new Map<string, ExecutionStep>();
+  let summary: ExecutionSummary | null = null;
+
+  for (const event of events) {
+    if (!event || typeof event !== 'object') continue;
+    const debugStep = event.debugJson?.step;
+    if (debugStep && debugStep.id) {
+      byStepId.set(String(debugStep.id), debugStep as ExecutionStep);
+      continue;
+    }
+    if (typeof event.stepId === 'string') {
+      const previous = byStepId.get(event.stepId);
+      byStepId.set(event.stepId, {
+        id: event.stepId,
+        order: previous?.order ?? 99,
+        title: String(event.label || previous?.title || event.stepId),
+        type: previous?.type || 'validation',
+        status: (event.status || previous?.status || 'running') as ExecutionStep['status'],
+        summary: String(event.summary || previous?.summary || 'Step update'),
+        userTitle: event.userTitle || previous?.userTitle,
+        userMessage: event.userMessage || previous?.userMessage,
+        nextSteps: Array.isArray(previous?.nextSteps)
+          ? previous?.nextSteps
+          : Array.isArray(event.nextSteps)
+            ? event.nextSteps
+            : undefined,
+        rationale: event.rationale || previous?.rationale,
+        technicalDetails: previous?.technicalDetails,
+        fixesApplied: previous?.fixesApplied,
+        attempts: previous?.attempts,
+        meta: previous?.meta,
+        debug: event.debugJson || previous?.debug,
+        createdIds: event.createdIdsJson || previous?.createdIds,
+        startedAt: previous?.startedAt || event.ts || new Date().toISOString(),
+        finishedAt:
+          event.status === 'success' || event.status === 'error'
+            ? event.ts || previous?.finishedAt || new Date().toISOString()
+            : previous?.finishedAt,
+      });
+    }
+    if (event.type === 'timeline.done') {
+      const eventSummary = event.debugJson?.summary;
+      if (eventSummary) {
+        summary = eventSummary as ExecutionSummary;
+      }
+    }
+  }
+
+  return {
+    steps: Array.from(byStepId.values()).sort(
+      (a, b) => a.order - b.order || a.startedAt.localeCompare(b.startedAt)
+    ),
+    summary,
+  };
 }

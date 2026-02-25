@@ -6,6 +6,7 @@ export type {
   AdAccountHierarchyPayload,
   AdAccountQuickMetrics,
   AIAction,
+  CreatedEntityIds,
   EntityPerformance,
   ExecutionBlockingError,
   ExecutionStep,

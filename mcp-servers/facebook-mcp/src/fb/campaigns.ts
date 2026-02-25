@@ -205,6 +205,10 @@ export class CampaignsApi {
     return { copiedCampaignId: response.data.copied_campaign_id };
   }
 
+  async getCampaignById(ctx: RequestContext, campaignId: string): Promise<FacebookCampaign> {
+    return this.readCampaignById(ctx, campaignId);
+  }
+
   private async readCampaignById(ctx: RequestContext, campaignId: string): Promise<FacebookCampaign> {
     const response = await this.graphClient.request<Record<string, unknown>>(ctx, {
       method: 'GET',

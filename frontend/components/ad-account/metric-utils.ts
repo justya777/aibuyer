@@ -4,18 +4,21 @@ export type MetricKey =
   | 'ctr'
   | 'cpc'
   | 'clicks'
+  | 'impressions'
   | 'conversions'
   | 'costPerConversion'
+  | 'cpa'
+  | 'leads'
   | 'spend'
   | 'dailyBudget';
 
 export function formatMetricValue(metric: MetricKey, value: number | null | undefined): string {
   if (value == null || Number.isNaN(value)) return '-';
   if (metric === 'ctr') return `${value.toFixed(2)}%`;
-  if (metric === 'cpc' || metric === 'costPerConversion' || metric === 'spend' || metric === 'dailyBudget') {
+  if (metric === 'cpc' || metric === 'costPerConversion' || metric === 'cpa' || metric === 'spend' || metric === 'dailyBudget') {
     return `$${value.toFixed(2)}`;
   }
-  if (metric === 'clicks') return `${Math.round(value)}`;
+  if (metric === 'clicks' || metric === 'impressions' || metric === 'leads') return `${Math.round(value)}`;
   return `${Math.round(value)}`;
 }
 
@@ -31,12 +34,17 @@ export function getMetricTone(metric: MetricKey, value: number | null | undefine
     if (value <= 3) return 'warning';
     return 'poor';
   }
-  if (metric === 'costPerConversion') {
+  if (metric === 'costPerConversion' || metric === 'cpa') {
     if (value <= 10) return 'good';
     if (value <= 25) return 'warning';
     return 'poor';
   }
   if (metric === 'conversions') {
+    if (value >= 10) return 'good';
+    if (value >= 3) return 'warning';
+    return 'poor';
+  }
+  if (metric === 'leads') {
     if (value >= 10) return 'good';
     if (value >= 3) return 'warning';
     return 'poor';

@@ -122,6 +122,7 @@ export interface TargetingSnapshot {
   gender?: 'male' | 'female' | 'all';
   interests: string[];
   behaviors: string[];
+  languages?: string[];
 }
 
 export interface AdAccountHierarchyAd {
@@ -238,6 +239,14 @@ export type ExecutionStepStatus =
   | 'retrying'
   | 'warning';
 
+export interface CreatedEntityIds {
+  campaignId?: string;
+  adSetId?: string;
+  adId?: string;
+  adSetIds?: string[];
+  adIds?: string[];
+}
+
 export interface ExecutionStep {
   id: string;
   order: number;
@@ -245,11 +254,16 @@ export interface ExecutionStep {
   type: ExecutionStepType;
   status: ExecutionStepStatus;
   summary: string;
+  userTitle?: string;
   userMessage?: string;
+  nextSteps?: string[];
+  rationale?: string;
   technicalDetails?: string;
   fixesApplied?: string[];
   attempts?: number;
   meta?: Record<string, any>;
+  debug?: Record<string, any>;
+  createdIds?: CreatedEntityIds;
   startedAt: string;
   finishedAt?: string;
 }
@@ -260,12 +274,18 @@ export interface ExecutionSummary {
   retries: number;
   finalStatus: 'success' | 'error' | 'partial';
   finalMessage: string;
+  createdIds?: CreatedEntityIds;
 }
 
 export interface ExecutionBlockingError {
   code: 'DSA_REQUIRED' | 'DEFAULT_PAGE_REQUIRED' | 'PAYMENT_METHOD_REQUIRED';
+  category?: string;
+  blocking?: boolean;
+  userTitle?: string;
+  userMessage?: string;
   message: string;
   nextSteps: string[];
+  debug?: Record<string, unknown>;
   action?:
     | {
         type: 'OPEN_DSA_SETTINGS';
@@ -280,6 +300,36 @@ export interface ExecutionBlockingError {
 }
 
 export type ExecutionStreamEvent =
+  | {
+      type: 'timeline.start';
+      runId?: string;
+      executionId: string;
+      ts: string;
+    }
+  | {
+      type: 'step.start' | 'step.update' | 'step.success' | 'step.error';
+      runId?: string;
+      stepId: string;
+      label: string;
+      status: ExecutionStepStatus;
+      summary?: string;
+      userTitle?: string;
+      userMessage?: string;
+      nextSteps?: string[];
+      rationale?: string;
+      debug?: Record<string, unknown>;
+      ids?: CreatedEntityIds;
+      ts: string;
+      step?: ExecutionStep;
+    }
+  | {
+      type: 'timeline.done';
+      runId?: string;
+      success: boolean;
+      createdIds?: CreatedEntityIds;
+      summary: ExecutionSummary;
+      ts: string;
+    }
   | {
       type: 'step_update';
       step: ExecutionStep;
@@ -296,6 +346,41 @@ export type ExecutionStreamEvent =
       type: 'done';
       summary: ExecutionSummary;
     };
+
+export interface TimelineEvent {
+  runId: string;
+  stepId: string;
+  stepIndex: number;
+  tool: string;
+  label: string;
+  status: 'running' | 'retrying' | 'success' | 'error';
+  startTs: string;
+  endTs?: string;
+  userSummary: string;
+  decisionReason?: string;
+  autofixes: string[];
+  metaError?: {
+    code: number;
+    subcode?: number;
+    user_title?: string;
+    user_msg?: string;
+    fbtrace_id?: string;
+  };
+  created?: Partial<CreatedEntityIds>;
+  payloadPreview?: Record<string, unknown>;
+  responsePreview?: Record<string, unknown>;
+}
+
+export interface TargetingConstraints {
+  language?: string;
+  localeIds?: number[];
+  localeNames?: string[];
+  ageMin?: number;
+  ageMax?: number;
+  countries?: string[];
+  gender?: 'all' | 'male' | 'female';
+  interests?: string[];
+}
 
 export interface AICommand {
   id: string;

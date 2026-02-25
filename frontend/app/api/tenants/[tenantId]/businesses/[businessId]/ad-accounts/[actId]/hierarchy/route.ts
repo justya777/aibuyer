@@ -6,6 +6,8 @@ import {
   TenantAccessError,
   resolveTenantContext,
 } from '@/lib/tenant-context';
+import { cacheGet, cacheGetStale, cacheSet, isRateLimitMessage, estimateRetryAfterMs } from '@/lib/api-cache';
+import { withAccountQueue } from '@/lib/request-queue';
 import type {
   AdAccountHierarchyAd,
   AdAccountHierarchyAdSet,
@@ -83,6 +85,7 @@ function mapTargeting(raw: any): TargetingSnapshot {
   const gender = raw?.gender === 'male' || raw?.gender === 'female' || raw?.gender === 'all' ? raw.gender : 'all';
   const ageMin = typeof raw?.ageMin === 'number' ? raw.ageMin : undefined;
   const ageMax = typeof raw?.ageMax === 'number' ? raw.ageMax : undefined;
+  const languages = Array.isArray(raw?.languages) ? raw.languages.map((v: unknown) => String(v)) : [];
   return {
     countries,
     gender,
@@ -90,6 +93,7 @@ function mapTargeting(raw: any): TargetingSnapshot {
     ageMax,
     interests,
     behaviors,
+    ...(languages.length > 0 ? { languages } : {}),
   };
 }
 
@@ -99,24 +103,46 @@ function mapCountry(codeOrName: string): string {
 }
 
 function buildTargetingSummary(targeting: TargetingSnapshot): string {
-  const countryLabel =
-    targeting.countries.length > 0
-      ? targeting.countries.slice(0, 2).map(mapCountry).join(', ')
-      : 'All countries';
-  const genderLabel =
-    targeting.gender === 'male' ? 'Men' : targeting.gender === 'female' ? 'Women' : 'All genders';
-  const ageLabel =
-    typeof targeting.ageMin === 'number' || typeof targeting.ageMax === 'number'
-      ? `${targeting.ageMin ?? 18}-${targeting.ageMax ?? 65}`
-      : '18-65';
-  const interestLabel = targeting.interests.length > 0 ? targeting.interests[0] : 'Broad audience';
-  return `${countryLabel} • ${genderLabel} ${ageLabel} • ${interestLabel}`;
+  const hasAnyData =
+    targeting.countries.length > 0 ||
+    typeof targeting.ageMin === 'number' ||
+    typeof targeting.ageMax === 'number' ||
+    (targeting.gender && targeting.gender !== 'all') ||
+    targeting.interests.length > 0 ||
+    (targeting.languages && targeting.languages.length > 0);
+
+  if (!hasAnyData) return '';
+
+  const parts: string[] = [];
+
+  if (targeting.countries.length > 0) {
+    parts.push(targeting.countries.slice(0, 2).map(mapCountry).join(', '));
+  }
+
+  if (typeof targeting.ageMin === 'number' || typeof targeting.ageMax === 'number') {
+    const genderLabel =
+      targeting.gender === 'male' ? 'Men' : targeting.gender === 'female' ? 'Women' : 'All genders';
+    parts.push(`${genderLabel} ${targeting.ageMin ?? '?'}-${targeting.ageMax ?? '?'}`);
+  } else if (targeting.gender && targeting.gender !== 'all') {
+    parts.push(targeting.gender === 'male' ? 'Men' : 'Women');
+  }
+
+  if (targeting.languages && targeting.languages.length > 0) {
+    parts.push(targeting.languages.slice(0, 2).map((l) => l.charAt(0).toUpperCase() + l.slice(1)).join(', '));
+  }
+
+  if (targeting.interests.length > 0) {
+    parts.push(targeting.interests[0]);
+  }
+
+  return parts.join(' \u2022 ');
 }
 
 function mergeCampaignTargetingFromAdSets(adSets: AdAccountHierarchyAdSet[]): TargetingSnapshot {
   const countrySet = new Set<string>();
   const interestSet = new Set<string>();
   const behaviorSet = new Set<string>();
+  const languageSet = new Set<string>();
   const genders = new Set<'male' | 'female' | 'all'>();
   let ageMin: number | undefined;
   let ageMax: number | undefined;
@@ -125,6 +151,9 @@ function mergeCampaignTargetingFromAdSets(adSets: AdAccountHierarchyAdSet[]): Ta
     for (const country of adSet.targeting.countries) countrySet.add(country);
     for (const interest of adSet.targeting.interests) interestSet.add(interest);
     for (const behavior of adSet.targeting.behaviors) behaviorSet.add(behavior);
+    if (adSet.targeting.languages) {
+      for (const lang of adSet.targeting.languages) languageSet.add(lang);
+    }
     if (adSet.targeting.gender) genders.add(adSet.targeting.gender);
     if (typeof adSet.targeting.ageMin === 'number') {
       ageMin = typeof ageMin === 'number' ? Math.min(ageMin, adSet.targeting.ageMin) : adSet.targeting.ageMin;
@@ -137,6 +166,7 @@ function mergeCampaignTargetingFromAdSets(adSets: AdAccountHierarchyAdSet[]): Ta
   const gender: 'male' | 'female' | 'all' =
     genders.size === 1 ? (Array.from(genders)[0] as 'male' | 'female' | 'all') : 'all';
 
+  const languages = Array.from(languageSet);
   return {
     countries: Array.from(countrySet),
     gender,
@@ -144,6 +174,7 @@ function mergeCampaignTargetingFromAdSets(adSets: AdAccountHierarchyAdSet[]): Ta
     ageMax,
     interests: Array.from(interestSet),
     behaviors: Array.from(behaviorSet),
+    ...(languages.length > 0 ? { languages } : {}),
   };
 }
 
@@ -225,148 +256,184 @@ export async function GET(
       );
     }
 
+    const hierarchyCacheKey = ['hierarchy', adAccountId];
+    const cached = cacheGet<AdAccountHierarchyPayload>(hierarchyCacheKey);
+    if (cached) {
+      return NextResponse.json({
+        success: true,
+        tenantId,
+        businessId,
+        adAccountId,
+        ...cached,
+      });
+    }
+
     const mcpClient = new MCPClient({
       tenantId,
       userId: context.userId,
       isPlatformAdmin: context.isPlatformAdmin,
     });
 
-    const accountInsights = await getInsightsSafe(mcpClient, {
-      level: 'account',
-      accountId: adAccountId,
-    });
+    const queuedCall = <T>(fn: () => Promise<T>) => withAccountQueue(adAccountId, fn);
 
-    const rawCampaigns = await mcpClient.callTool('get_campaigns', {
-      accountId: adAccountId,
-      limit: 50,
-      status: ['ACTIVE', 'PAUSED', 'CAMPAIGN_PAUSED', 'ADSET_PAUSED', 'WITH_ISSUES', 'IN_PROCESS'],
-    });
-    const campaignsSource = Array.isArray(rawCampaigns) ? rawCampaigns : [];
+    let accountInsights: EntityPerformance;
+    let rawCampaigns: any[];
+    try {
+      [accountInsights, rawCampaigns] = await Promise.all([
+        queuedCall(() => getInsightsSafe(mcpClient, { level: 'account', accountId: adAccountId })),
+        queuedCall(async () => {
+          const result = await mcpClient.callTool('get_campaigns', {
+            accountId: adAccountId,
+            limit: 50,
+            status: ['ACTIVE', 'PAUSED', 'CAMPAIGN_PAUSED', 'ADSET_PAUSED', 'WITH_ISSUES', 'IN_PROCESS', 'PENDING_REVIEW'],
+          });
+          return Array.isArray(result) ? result : [];
+        }),
+      ]);
+    } catch (fetchError) {
+      if (isRateLimitMessage(fetchError)) {
+        const stale = cacheGetStale<AdAccountHierarchyPayload>(hierarchyCacheKey);
+        if (stale) {
+          return NextResponse.json({
+            success: true, tenantId, businessId, adAccountId,
+            ...stale, rateLimited: true, retryAfterMs: estimateRetryAfterMs(fetchError),
+          });
+        }
+      }
+      throw fetchError;
+    }
 
-    const campaigns: AdAccountHierarchyCampaign[] = await Promise.all(
-      campaignsSource.map(async (campaign: any) => {
-        const campaignId = String(campaign?.id || '');
-        const campaignInsights = await getInsightsSafe(mcpClient, {
-          level: 'campaign',
-          campaignId,
-        });
+    const campaigns: AdAccountHierarchyCampaign[] = [];
+    for (const campaign of rawCampaigns) {
+      const campaignId = String(campaign?.id || '');
+      const campaignInsights = await queuedCall(() =>
+        getInsightsSafe(mcpClient, { level: 'campaign', campaignId })
+      );
 
-        let rawAdSets: any[] = [];
-        try {
-          const adSetResult = await mcpClient.callTool('get_adsets', {
+      let rawAdSets: any[] = [];
+      try {
+        const adSetResult = await queuedCall(() =>
+          mcpClient.callTool('get_adsets', {
             campaignId,
             limit: 50,
-            status: ['ACTIVE', 'PAUSED', 'ADSET_PAUSED', 'IN_PROCESS', 'WITH_ISSUES'],
-          });
-          rawAdSets = Array.isArray(adSetResult) ? adSetResult : [];
-        } catch {
-          rawAdSets = [];
-        }
-
-        const adSets: AdAccountHierarchyAdSet[] = await Promise.all(
-          rawAdSets.map(async (adSet: any) => {
-            const adSetId = String(adSet?.id || '');
-            const adSetInsights = await getInsightsSafe(mcpClient, {
-              level: 'adset',
-              adSetId,
-            });
-
-            let rawAds: any[] = [];
-            try {
-              const adResult = await mcpClient.callTool('get_ads', {
-                adSetId,
-                limit: 50,
-                status: ['ACTIVE', 'PAUSED', 'ADSET_PAUSED', 'WITH_ISSUES'],
-              });
-              rawAds = Array.isArray(adResult) ? adResult : [];
-            } catch {
-              rawAds = [];
-            }
-
-            const ads: AdAccountHierarchyAd[] = await Promise.all(
-              rawAds.map(async (ad: any) => {
-                const adId = String(ad?.id || '');
-                const adInsights = await getInsightsSafe(mcpClient, {
-                  level: 'ad',
-                  adId,
-                });
-                return {
-                  id: adId,
-                  campaignId: String(ad?.campaignId || campaignId),
-                  adSetId: String(ad?.adSetId || adSetId),
-                  name: String(ad?.name || adId),
-                  status: ad?.status === 'active' || ad?.status === 'paused' ? ad.status : 'paused',
-                  creative: {
-                    title: typeof ad?.creative?.title === 'string' ? ad.creative.title : undefined,
-                    body: typeof ad?.creative?.body === 'string' ? ad.creative.body : undefined,
-                    imageUrl: typeof ad?.creative?.imageUrl === 'string' ? ad.creative.imageUrl : undefined,
-                    videoUrl: typeof ad?.creative?.videoUrl === 'string' ? ad.creative.videoUrl : undefined,
-                    linkUrl: typeof ad?.creative?.linkUrl === 'string' ? ad.creative.linkUrl : undefined,
-                  },
-                  performance: adInsights,
-                  createdAt: toIso(ad?.createdAt),
-                  updatedAt: toIso(ad?.updatedAt),
-                };
-              })
-            );
-
-            const targeting = mapTargeting(adSet?.targeting);
-            return {
-              id: adSetId,
-              campaignId: String(adSet?.campaignId || campaignId),
-              name: String(adSet?.name || adSetId),
-              status: adSet?.status === 'active' || adSet?.status === 'paused' ? adSet.status : 'paused',
-              optimizationGoal: String(adSet?.optimizationGoal || ''),
-              billingEvent: String(adSet?.billingEvent || ''),
-              budget: {
-                daily: typeof adSet?.budget?.daily === 'number' ? adSet.budget.daily / 100 : undefined,
-                lifetime:
-                  typeof adSet?.budget?.lifetime === 'number' ? adSet.budget.lifetime / 100 : undefined,
-                remaining: toNumber(adSet?.budget?.remaining) / 100,
-              },
-              targeting,
-              targetingSummary: buildTargetingSummary(targeting),
-              performance: adSetInsights,
-              ads,
-              createdAt: toIso(adSet?.createdAt),
-              updatedAt: toIso(adSet?.updatedAt),
-            };
+            status: ['ACTIVE', 'PAUSED', 'ADSET_PAUSED', 'IN_PROCESS', 'WITH_ISSUES', 'PENDING_REVIEW'],
           })
         );
+        rawAdSets = Array.isArray(adSetResult) ? adSetResult : [];
+      } catch (err) {
+        if (isRateLimitMessage(err)) {
+          const stale = cacheGetStale<AdAccountHierarchyPayload>(hierarchyCacheKey);
+          if (stale) {
+            return NextResponse.json({
+              success: true, tenantId, businessId, adAccountId,
+              ...stale, rateLimited: true, retryAfterMs: estimateRetryAfterMs(err),
+            });
+          }
+        }
+        rawAdSets = [];
+      }
 
-        const rawCampaignTargeting = mapTargeting(campaign?.targeting);
-        const shouldUseAdSetTargeting =
-          rawCampaignTargeting.countries.length === 0 &&
-          rawCampaignTargeting.interests.length === 0 &&
-          rawCampaignTargeting.behaviors.length === 0 &&
-          typeof rawCampaignTargeting.ageMin !== 'number' &&
-          typeof rawCampaignTargeting.ageMax !== 'number';
-        const targeting = shouldUseAdSetTargeting ? mergeCampaignTargetingFromAdSets(adSets) : rawCampaignTargeting;
+      const adSets: AdAccountHierarchyAdSet[] = [];
+      for (const adSet of rawAdSets) {
+        const adSetId = String(adSet?.id || '');
+        const adSetInsights = await queuedCall(() =>
+          getInsightsSafe(mcpClient, { level: 'adset', adSetId })
+        );
 
-        return {
-          id: campaignId,
-          accountId: String(campaign?.accountId || adAccountId),
-          name: String(campaign?.name || campaignId),
-          status:
-            campaign?.status === 'active' || campaign?.status === 'paused' ? campaign.status : 'paused',
-          objective: String(campaign?.objective || ''),
+        let rawAds: any[] = [];
+        try {
+          const adResult = await queuedCall(() =>
+            mcpClient.callTool('get_ads', {
+              adSetId,
+              limit: 50,
+              status: ['ACTIVE', 'PAUSED', 'ADSET_PAUSED', 'WITH_ISSUES', 'PENDING_REVIEW', 'IN_PROCESS'],
+            })
+          );
+          rawAds = Array.isArray(adResult) ? adResult : [];
+        } catch {
+          rawAds = [];
+        }
+
+        const ads: AdAccountHierarchyAd[] = [];
+        for (const ad of rawAds) {
+          const adId = String(ad?.id || '');
+          const adInsights = await queuedCall(() =>
+            getInsightsSafe(mcpClient, { level: 'ad', adId })
+          );
+          ads.push({
+            id: adId,
+            campaignId: String(ad?.campaignId || campaignId),
+            adSetId: String(ad?.adSetId || adSetId),
+            name: String(ad?.name || adId),
+            status: ad?.status === 'active' || ad?.status === 'paused' ? ad.status : 'paused',
+            creative: {
+              title: typeof ad?.creative?.title === 'string' ? ad.creative.title : undefined,
+              body: typeof ad?.creative?.body === 'string' ? ad.creative.body : undefined,
+              imageUrl: typeof ad?.creative?.imageUrl === 'string' ? ad.creative.imageUrl : undefined,
+              videoUrl: typeof ad?.creative?.videoUrl === 'string' ? ad.creative.videoUrl : undefined,
+              linkUrl: typeof ad?.creative?.linkUrl === 'string' ? ad.creative.linkUrl : undefined,
+            },
+            performance: adInsights,
+            createdAt: toIso(ad?.createdAt),
+            updatedAt: toIso(ad?.updatedAt),
+          });
+        }
+
+        const targeting = mapTargeting(adSet?.targeting);
+        adSets.push({
+          id: adSetId,
+          campaignId: String(adSet?.campaignId || campaignId),
+          name: String(adSet?.name || adSetId),
+          status: adSet?.status === 'active' || adSet?.status === 'paused' ? adSet.status : 'paused',
+          optimizationGoal: String(adSet?.optimizationGoal || ''),
+          billingEvent: String(adSet?.billingEvent || ''),
           budget: {
-            daily:
-              typeof campaign?.budget?.daily === 'number' ? campaign.budget.daily / 100 : undefined,
+            daily: typeof adSet?.budget?.daily === 'number' ? adSet.budget.daily / 100 : undefined,
             lifetime:
-              typeof campaign?.budget?.lifetime === 'number' ? campaign.budget.lifetime / 100 : undefined,
-            remaining: toNumber(campaign?.budget?.remaining) / 100,
+              typeof adSet?.budget?.lifetime === 'number' ? adSet.budget.lifetime / 100 : undefined,
+            remaining: toNumber(adSet?.budget?.remaining) / 100,
           },
           targeting,
           targetingSummary: buildTargetingSummary(targeting),
-          performance: campaignInsights,
-          adSets,
-          startDate: campaign?.startDate ? toIso(campaign.startDate) : undefined,
-          createdAt: toIso(campaign?.createdAt),
-          updatedAt: toIso(campaign?.updatedAt),
-        };
-      })
-    );
+          performance: adSetInsights,
+          ads,
+          createdAt: toIso(adSet?.createdAt),
+          updatedAt: toIso(adSet?.updatedAt),
+        });
+      }
+
+      const rawCampaignTargeting = mapTargeting(campaign?.targeting);
+      const shouldUseAdSetTargeting =
+        rawCampaignTargeting.countries.length === 0 &&
+        rawCampaignTargeting.interests.length === 0 &&
+        rawCampaignTargeting.behaviors.length === 0 &&
+        typeof rawCampaignTargeting.ageMin !== 'number' &&
+        typeof rawCampaignTargeting.ageMax !== 'number';
+      const targeting = shouldUseAdSetTargeting ? mergeCampaignTargetingFromAdSets(adSets) : rawCampaignTargeting;
+
+      campaigns.push({
+        id: campaignId,
+        accountId: String(campaign?.accountId || adAccountId),
+        name: String(campaign?.name || campaignId),
+        status:
+          campaign?.status === 'active' || campaign?.status === 'paused' ? campaign.status : 'paused',
+        objective: String(campaign?.objective || ''),
+        budget: {
+          daily:
+            typeof campaign?.budget?.daily === 'number' ? campaign.budget.daily / 100 : undefined,
+          lifetime:
+            typeof campaign?.budget?.lifetime === 'number' ? campaign.budget.lifetime / 100 : undefined,
+          remaining: toNumber(campaign?.budget?.remaining) / 100,
+        },
+        targeting,
+        targetingSummary: buildTargetingSummary(targeting),
+        performance: campaignInsights,
+        adSets,
+        startDate: campaign?.startDate ? toIso(campaign.startDate) : undefined,
+        createdAt: toIso(campaign?.createdAt),
+        updatedAt: toIso(campaign?.updatedAt),
+      });
+    }
 
     const allAdSets = campaigns.flatMap((campaign) => campaign.adSets);
     const allAds = allAdSets.flatMap((adSet) => adSet.ads);
@@ -398,6 +465,7 @@ export async function GET(
       ads: allAds,
     };
 
+    cacheSet(hierarchyCacheKey, payload);
     return NextResponse.json({
       success: true,
       tenantId,

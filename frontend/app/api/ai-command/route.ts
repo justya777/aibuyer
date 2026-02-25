@@ -5,6 +5,7 @@ import {
   TenantAccessError,
   resolveTenantContext,
 } from '@/lib/tenant-context';
+import { createAiRun } from '@/lib/ai-execution/run-store';
 import { createExecutionSession } from '@/lib/ai-execution/session-store';
 
 const AICommandSchema = z.object({
@@ -22,8 +23,16 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const { command, accountId, businessId } = AICommandSchema.parse(body);
     const requestCookie = request.headers.get('cookie') || undefined;
+    const run = await createAiRun({
+      userId: context.userId,
+      tenantId: context.tenantId,
+      businessId,
+      adAccountId: accountId,
+      commandText: command,
+    });
 
     const session = createExecutionSession({
+      runId: run.id,
       userId: context.userId,
       tenantId: context.tenantId,
       command,
@@ -35,6 +44,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       success: true,
       executionId: session.id,
+      runId: run.id,
       message: 'Execution started',
     });
   } catch (error) {

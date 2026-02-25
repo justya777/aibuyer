@@ -165,7 +165,7 @@ export class AdSetsApi {
         limit: params.limit || 50,
         fields:
           'id,name,status,optimization_goal,billing_event,daily_budget,lifetime_budget,targeting,created_time,updated_time,campaign_id,account_id',
-        effective_status: params.status?.join(','),
+        effective_status: params.status && params.status.length > 0 ? JSON.stringify(params.status) : undefined,
       },
     });
     return (response.data.data || []).map((record) => mapAdSet(record));

@@ -8,6 +8,7 @@ import {
   CreateAdSchema,
   CreateAdSetSchema,
   CreateCampaignSchema,
+  GetCampaignByIdSchema,
   AutofillDsaForAdAccountSchema,
   GetDsaAutofillSuggestionsSchema,
   GetDsaSettingsSchema,
@@ -87,6 +88,10 @@ export class FacebookToolHandlers {
       case 'get_campaigns': {
         const parsed = parseArgs(GetCampaignsSchema, args);
         return this.facebookService.getCampaigns(parsed);
+      }
+      case 'get_campaign_by_id': {
+        const parsed = parseArgs(GetCampaignByIdSchema, args);
+        return this.facebookService.getCampaignById(parsed);
       }
       case 'create_campaign': {
         const parsed = parseArgs(CreateCampaignSchema, args);

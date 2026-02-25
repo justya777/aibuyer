@@ -2,11 +2,13 @@ import OpenAI from 'openai';
 import { buildSystemPrompt, parseTrackingUrl } from '../campaign-config';
 import { MCPClient } from '../mcp-client';
 import type {
+  CreatedEntityIds,
   ExecutionBlockingError,
   ExecutionStep,
   ExecutionSummary,
 } from '../../../shared/types';
-import { mapGraphError } from './error-humanizer';
+import { normalizeExecutionError } from './error-normalizer';
+import { parseTargetingConstraints, enforceTargetingConstraints } from './constraint-parser';
 import { facebookTools } from './facebook-tools';
 import {
   appendStepFixes,
@@ -45,6 +47,7 @@ export interface RunAiExecutionResult {
   reasoning: string;
   message: string;
   success: boolean;
+  createdIds?: CreatedEntityIds;
   blockingError?: ExecutionBlockingError;
 }
 
@@ -212,6 +215,7 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
         `Executing ${descriptor.title.toLowerCase()}...`,
         { tool: toolCall.function.name }
       );
+      console.log(`[AI-EXEC] started | tool=${toolCall.function.name} | step=${descriptor.key} | attempt=${step.attempts}`);
       await emitStep(step);
 
       const stepFixesApplied: string[] = [];
@@ -379,8 +383,31 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
           }
 
           if (toolArgs.targeting?.locales) {
-            delete toolArgs.targeting.locales;
-            stepFixesApplied.push('Removed unsupported locale targeting to avoid API rejection.');
+            const normalized = normalizeLocalesForMcp(toolArgs.targeting.locales);
+            if (normalized.length > 0) {
+              toolArgs.targeting.locales = normalized;
+              stepFixesApplied.push(`Passing language targeting to Meta for resolution: [${normalized.join(', ')}].`);
+            } else {
+              const constraints = parseTargetingConstraints(command);
+              if (constraints.language) {
+                toolArgs.targeting.locales = [constraints.language];
+                stepFixesApplied.push(`Restored ${constraints.language} language targeting from user command.`);
+              } else {
+                delete toolArgs.targeting.locales;
+                stepFixesApplied.push(
+                  'Removed empty locale targeting; no language was specified in the command.'
+                );
+              }
+            }
+          }
+
+          const constraints = parseTargetingConstraints(command);
+          const constraintFixes = enforceTargetingConstraints(toolArgs, constraints);
+          for (const fix of constraintFixes) {
+            stepFixesApplied.push(fix);
+          }
+          if (constraintFixes.length > 0) {
+            console.log(`[AI-CONSTRAINT] tool=${toolCall.function.name} | ${constraintFixes.join('; ')}`);
           }
         }
 
@@ -541,6 +568,11 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
         }
 
         if (stepFixesApplied.length > 0) {
+          const existingFixes = new Set(stepRegistry.byKey.get(descriptor.key)?.fixesApplied || []);
+          const newFixes = stepFixesApplied.filter((f) => !existingFixes.has(f));
+          if (newFixes.length > 0) {
+            console.log(`[AI-AUTOFIX] tool=${toolCall.function.name} | ${newFixes.join('; ')}`);
+          }
           const withFixes = appendStepFixes(stepRegistry, descriptor.key, stepFixesApplied);
           await emitStep(withFixes);
         }
@@ -578,11 +610,15 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
         );
         const successStep = markStepSuccess(stepRegistry, descriptor.key, {
           summary: successSummary.summary,
+          userTitle: successSummary.userTitle,
           userMessage: successSummary.userMessage,
+          rationale: successSummary.rationale,
           technicalDetails: successSummary.technicalDetails,
           fixesApplied: stepFixesApplied,
           meta: successSummary.meta,
+          createdIds: successSummary.createdIds,
         });
+        console.log(`[AI-RESULT] tool=${toolCall.function.name} | ${successSummary.summary}`);
         await emitStep(successStep);
       } catch (error) {
         toolFailureCounts[toolCall.function.name] = (toolFailureCounts[toolCall.function.name] || 0) + 1;
@@ -600,32 +636,57 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
           content: `Error: ${errorMessage}`,
         });
 
-        const humanized = mapGraphError(errorMessage);
-        const willStopForBlockingError = isBlockingConfigurationError(errorMessage);
+        const normalizedError = normalizeExecutionError(errorMessage);
+        const attemptCount = toolFailureCounts[toolCall.function.name] || 1;
+        console.log(`[AI-RESULT] error | tool=${toolCall.function.name} | category=${normalizedError.category} | ${normalizedError.userTitle}`);
+        const willStopForBlockingError =
+          normalizedError.blocking || isBlockingConfigurationError(errorMessage);
         const reachedMaxFailures =
           toolFailureCounts[toolCall.function.name] >= MAX_CONSECUTIVE_TOOL_FAILURES;
         const shouldRetry = !willStopForBlockingError && !reachedMaxFailures;
+        if (shouldRetry) {
+          console.log(`[AI-RETRY] attempt=${attemptCount} | tool=${toolCall.function.name} | category=${normalizedError.category} | change=${normalizedError.rationale || 'will retry with auto-fixes'}`);
+        }
+        const autoFixNotes = [...stepFixesApplied];
+        if (normalizedError.category === 'bid_required' && !autoFixNotes.some((n) => n.includes('bid'))) {
+          autoFixNotes.push('Auto-fixed: Applied fallback bid amount and retried.');
+        }
+        if (normalizedError.category === 'advantage_audience' && !autoFixNotes.some((n) => n.includes('Advantage Audience'))) {
+          autoFixNotes.push(
+            'Auto-fixed: Set targetingAutomation.advantageAudience and retried.'
+          );
+        }
 
         if (shouldRetry) {
           const retryStep = markStepRetrying(stepRegistry, descriptor.key, {
             summary: `Attempt ${(stepRegistry.byKey.get(descriptor.key)?.attempts || 1)} failed. Retrying automatically.`,
-            userMessage: humanized.userMessage,
-            technicalDetails: humanized.technicalDetails,
-            fixesApplied: humanized.autoFix ? [humanized.autoFix] : stepFixesApplied,
+            userTitle: normalizedError.userTitle,
+            userMessage: normalizedError.userMessage,
+            nextSteps: normalizedError.nextSteps,
+            rationale: normalizedError.rationale,
+            technicalDetails: normalizedError.debug.raw,
+            fixesApplied: autoFixNotes,
             meta: {
-              explanation: humanized.explanation,
+              category: normalizedError.category,
+              explanation: normalizedError.rationale,
             },
+            debug: normalizedError.debug,
           });
           await emitStep(retryStep);
         } else {
           const errorStep = markStepError(stepRegistry, descriptor.key, {
             summary: `${descriptor.title} failed.`,
-            userMessage: humanized.userMessage,
-            technicalDetails: humanized.technicalDetails,
-            fixesApplied: humanized.autoFix ? [humanized.autoFix] : stepFixesApplied,
+            userTitle: normalizedError.userTitle,
+            userMessage: normalizedError.userMessage,
+            nextSteps: normalizedError.nextSteps,
+            rationale: normalizedError.rationale,
+            technicalDetails: normalizedError.debug.raw,
+            fixesApplied: autoFixNotes,
             meta: {
-              explanation: humanized.explanation,
+              category: normalizedError.category,
+              explanation: normalizedError.rationale,
             },
+            debug: normalizedError.debug,
           });
           await emitStep(errorStep);
         }
@@ -645,9 +706,10 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
             try {
               await mcpClient.callTool('update_adset', {
                 adSetId: createdAdSetAction.result.id,
-                status: 'DELETED',
+                status: 'PAUSED',
                 businessId,
               });
+              console.log(`[AI-ROLLBACK] Paused adset ${createdAdSetAction.result.id} due to billing failure (safer than delete)`);
             } catch {
               // Ignore rollback failures.
             }
@@ -656,9 +718,10 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
             try {
               await mcpClient.callTool('update_campaign', {
                 campaignId: createdCampaignAction.result.id,
-                status: 'DELETED',
+                status: 'PAUSED',
                 businessId,
               });
+              console.log(`[AI-ROLLBACK] Paused campaign ${createdCampaignAction.result.id} due to billing failure (safer than delete)`);
             } catch {
               // Ignore rollback failures.
             }
@@ -764,6 +827,7 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
   }
 
   const steps = listExecutionSteps(stepRegistry);
+  const createdIds = extractCreatedIds(actions);
   if (blockingError) {
     const normalizedBlockingError = normalizeBlockingError(blockingError);
     const normalizedRequestAdAccountId = normalizeAdAccountId(accountId);
@@ -783,30 +847,34 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
           : undefined;
     const blockingPayload: ExecutionBlockingError = {
       ...normalizedBlockingError,
+      message: normalizedBlockingError.userMessage,
       action,
     };
     const summary = buildExecutionSummary(
       steps,
       false,
-      normalizedBlockingError.message
+      normalizedBlockingError.userMessage,
+      createdIds
     );
     return {
       success: false,
       steps,
       summary,
       reasoning,
-      message: normalizedBlockingError.message,
+      message: normalizedBlockingError.userMessage,
+      createdIds,
       blockingError: blockingPayload,
     };
   }
 
-  const summary = buildExecutionSummary(steps, true, summaryMessage);
+  const summary = buildExecutionSummary(steps, true, summaryMessage, createdIds);
   return {
     success: summary.finalStatus === 'success',
     steps,
     summary,
     reasoning,
     message: summaryMessage,
+    createdIds,
   };
 }
 
@@ -907,8 +975,11 @@ function buildSuccessSummary(
   requestedAdCount: number
 ): {
   summary: string;
+  userTitle?: string;
   userMessage?: string;
+  rationale?: string;
   technicalDetails?: string;
+  createdIds?: CreatedEntityIds;
   meta?: Record<string, any>;
 } {
   if (toolName === 'create_campaign') {
@@ -916,8 +987,12 @@ function buildSuccessSummary(
     const dailyBudget = result?.budget?.daily ?? toolArgs.dailyBudget;
     return {
       summary: `Campaign "${campaignName}" created with ${formatBudget(dailyBudget)} budget.`,
+      userTitle: 'Campaign created',
       userMessage: 'Campaign setup completed successfully.',
+      rationale:
+        'The command requested a new campaign, so we created the campaign first to provide a valid parent entity for downstream ad sets.',
       technicalDetails: result?.id ? `Campaign ID: ${result.id}` : undefined,
+      createdIds: result?.id ? { campaignId: String(result.id) } : undefined,
       meta: {
         objective: result?.objective || toolArgs.objective,
         status: result?.status || toolArgs.status,
@@ -928,8 +1003,12 @@ function buildSuccessSummary(
   if (toolName === 'create_adset') {
     return {
       summary: 'Ad set created successfully with validated targeting and budget settings.',
+      userTitle: 'Ad set created',
       userMessage: 'Ad set setup completed successfully.',
+      rationale:
+        'After campaign creation, we configured targeting, budget, and delivery optimization at ad set level.',
       technicalDetails: result?.id ? `Ad Set ID: ${result.id}` : undefined,
+      createdIds: result?.id ? { adSetId: String(result.id) } : undefined,
       meta: {
         id: result?.id,
         optimizationGoal: toolArgs.optimizationGoal,
@@ -941,11 +1020,17 @@ function buildSuccessSummary(
     const adsCreatedCount = actions.filter((a) => a.tool === 'create_ad' && a.success).length;
     return {
       summary: `${adsCreatedCount} of ${requestedAdCount} ad${requestedAdCount === 1 ? '' : 's'} created successfully.`,
+      userTitle: 'Ad created',
       userMessage:
         adsCreatedCount >= requestedAdCount
           ? 'All requested ads were created successfully.'
           : 'Ad created successfully. Continuing with remaining ads.',
+      rationale:
+        adsCreatedCount >= requestedAdCount
+          ? 'All requested creatives are now attached to the new ad set.'
+          : 'This ad was created and we are continuing to fulfill the requested ad count.',
       technicalDetails: result?.id ? `Latest Ad ID: ${result.id}` : undefined,
+      createdIds: result?.id ? { adId: String(result.id) } : undefined,
       meta: {
         adsCreated: adsCreatedCount,
         requestedAds: requestedAdCount,
@@ -957,13 +1042,15 @@ function buildSuccessSummary(
   }
   return {
     summary: `${toolName} completed successfully.`,
+    rationale: 'The requested operation completed successfully.',
   };
 }
 
 function buildExecutionSummary(
   steps: ExecutionStep[],
   success: boolean,
-  finalMessage: string
+  finalMessage: string,
+  createdIds?: CreatedEntityIds
 ): ExecutionSummary {
   const primarySteps = steps.filter(
     (step) => step.type === 'campaign' || step.type === 'adset' || step.type === 'ad'
@@ -986,6 +1073,7 @@ function buildExecutionSummary(
     retries,
     finalStatus,
     finalMessage,
+    createdIds,
   };
 }
 
@@ -994,6 +1082,33 @@ function formatBudget(value: unknown): string {
   if (!Number.isFinite(numeric) || numeric <= 0) return 'an assigned';
   const dollars = numeric / 100;
   return `$${Number.isInteger(dollars) ? dollars.toFixed(0) : dollars.toFixed(2)}/day`;
+}
+
+function extractCreatedIds(actions: RawAction[]): CreatedEntityIds | undefined {
+  const createdCampaign = actions.find((action) => action.tool === 'create_campaign' && action.success);
+  const createdAdSet = actions.find((action) => action.tool === 'create_adset' && action.success);
+  const createdAd = [...actions]
+    .reverse()
+    .find((action) => action.tool === 'create_ad' && action.success);
+  const adSetIds = actions
+    .filter((action) => action.tool === 'create_adset' && action.success && action.result?.id)
+    .map((action) => String(action.result.id));
+  const adIds = actions
+    .filter((action) => action.tool === 'create_ad' && action.success && action.result?.id)
+    .map((action) => String(action.result.id));
+
+  const payload: CreatedEntityIds = {
+    campaignId: createdCampaign?.result?.id ? String(createdCampaign.result.id) : undefined,
+    adSetId: createdAdSet?.result?.id ? String(createdAdSet.result.id) : undefined,
+    adId: createdAd?.result?.id ? String(createdAd.result.id) : undefined,
+    adSetIds: adSetIds.length > 0 ? adSetIds : undefined,
+    adIds: adIds.length > 0 ? adIds : undefined,
+  };
+
+  if (!payload.campaignId && !payload.adSetId && !payload.adId && !payload.adSetIds && !payload.adIds) {
+    return undefined;
+  }
+  return payload;
 }
 
 function getActionType(toolName: string): string {
@@ -1069,6 +1184,39 @@ function inferEuCountriesFromCommand(command: string): string[] {
   return Array.from(countries);
 }
 
+/**
+ * Normalize locale values into strings for MCP server resolution.
+ * Numbers are passed through (MCP accepts them); string language names
+ * are passed as-is so the MCP server resolves them via Graph API search.
+ * This avoids hardcoded locale ID mappings that can be wrong.
+ */
+function normalizeLocalesForMcp(rawLocales: unknown[]): Array<string | number> {
+  const result: Array<string | number> = [];
+  const seen = new Set<string>();
+
+  for (const locale of rawLocales) {
+    if (typeof locale === 'number' && Number.isFinite(locale)) {
+      const key = String(locale);
+      if (!seen.has(key)) { seen.add(key); result.push(locale); }
+      continue;
+    }
+    if (typeof locale === 'string') {
+      const trimmed = locale.trim();
+      if (!trimmed) continue;
+      const asNum = Number.parseInt(trimmed, 10);
+      if (Number.isFinite(asNum) && asNum.toString() === trimmed) {
+        const key = trimmed;
+        if (!seen.has(key)) { seen.add(key); result.push(asNum); }
+      } else {
+        const key = trimmed.toLowerCase();
+        if (!seen.has(key)) { seen.add(key); result.push(trimmed.toLowerCase()); }
+      }
+    }
+  }
+
+  return result;
+}
+
 function isManagementStyleCommand(command: string): boolean {
   const commandLower = command.toLowerCase();
   return (
@@ -1093,8 +1241,13 @@ function normalizeAdAccountId(value: string): string {
 
 function normalizeBlockingError(errorMessage: string): {
   code: 'DSA_REQUIRED' | 'DEFAULT_PAGE_REQUIRED' | 'PAYMENT_METHOD_REQUIRED';
+  category: string;
+  blocking: boolean;
+  userTitle: string;
+  userMessage: string;
   message: string;
   nextSteps: string[];
+  debug: Record<string, unknown>;
 } {
   if (
     errorMessage.includes('Select a default Page for this ad account') ||
@@ -1103,12 +1256,18 @@ function normalizeBlockingError(errorMessage: string): {
   ) {
     return {
       code: 'DEFAULT_PAGE_REQUIRED',
+      category: 'default_page',
+      blocking: true,
+      userTitle: 'Default Facebook Page required',
+      userMessage:
+        'Lead/link ads require a default Facebook Page connected to this ad account.',
       message: errorMessage,
       nextSteps: [
         'Open Tenant Ad Account Settings.',
         'Select a default Facebook Page for this ad account.',
         'Retry the campaign creation request after saving.',
       ],
+      debug: { raw: errorMessage },
     };
   }
 
@@ -1119,24 +1278,42 @@ function normalizeBlockingError(errorMessage: string): {
       nextSteps?: string[];
     };
     if (parsed && parsed.code === 'DEFAULT_PAGE_REQUIRED' && parsed.message) {
+      const normalized = normalizeExecutionError(parsed.message);
       return {
         code: 'DEFAULT_PAGE_REQUIRED',
+        category: normalized.category,
+        blocking: normalized.blocking,
+        userTitle: normalized.userTitle,
+        userMessage: normalized.userMessage,
         message: parsed.message,
         nextSteps: Array.isArray(parsed.nextSteps) ? parsed.nextSteps : [],
+        debug: normalized.debug,
       };
     }
     if (parsed && parsed.code === 'PAYMENT_METHOD_REQUIRED' && parsed.message) {
+      const normalized = normalizeExecutionError(parsed.message);
       return {
         code: 'PAYMENT_METHOD_REQUIRED',
+        category: normalized.category,
+        blocking: normalized.blocking,
+        userTitle: normalized.userTitle,
+        userMessage: normalized.userMessage,
         message: parsed.message,
         nextSteps: Array.isArray(parsed.nextSteps) ? parsed.nextSteps : [],
+        debug: normalized.debug,
       };
     }
     if (parsed && parsed.code === 'DSA_REQUIRED' && parsed.message) {
+      const normalized = normalizeExecutionError(parsed.message);
       return {
         code: 'DSA_REQUIRED',
+        category: normalized.category,
+        blocking: normalized.blocking,
+        userTitle: normalized.userTitle,
+        userMessage: normalized.userMessage,
         message: parsed.message,
         nextSteps: Array.isArray(parsed.nextSteps) ? parsed.nextSteps : [],
+        debug: normalized.debug,
       };
     }
   } catch {
@@ -1144,8 +1321,13 @@ function normalizeBlockingError(errorMessage: string): {
   }
 
   if (isPaymentMethodRequiredError(errorMessage)) {
+    const normalized = normalizeExecutionError(errorMessage);
     return {
       code: 'PAYMENT_METHOD_REQUIRED',
+      category: normalized.category,
+      blocking: normalized.blocking,
+      userTitle: normalized.userTitle,
+      userMessage: normalized.userMessage,
       message:
         errorMessage ||
         'Add a valid payment method for this ad account before creating campaigns and ads.',
@@ -1154,11 +1336,17 @@ function normalizeBlockingError(errorMessage: string): {
         'Add or confirm a valid payment method.',
         'Retry the campaign creation request.',
       ],
+      debug: normalized.debug,
     };
   }
 
+  const normalized = normalizeExecutionError(errorMessage);
   return {
     code: 'DSA_REQUIRED',
+    category: normalized.category,
+    blocking: normalized.blocking,
+    userTitle: normalized.userTitle,
+    userMessage: normalized.userMessage,
     message:
       errorMessage ||
       'DSA requirements are missing for EU targeting. Set DSA payor/beneficiary in tenant settings.',
@@ -1167,6 +1355,7 @@ function normalizeBlockingError(errorMessage: string): {
       'Autofill from Meta recommendations or set values manually.',
       'Retry the campaign creation request.',
     ],
+    debug: normalized.debug,
   };
 }
 

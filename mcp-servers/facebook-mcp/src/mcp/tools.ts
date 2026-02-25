@@ -6,6 +6,17 @@ const actorFields = {
   userId: z.string().optional(),
   isPlatformAdmin: z.boolean().optional(),
 };
+const coerceStringArray = z.preprocess(
+  (val) => {
+    if (Array.isArray(val)) return val;
+    if (typeof val === 'string') {
+      try { const parsed = JSON.parse(val); if (Array.isArray(parsed)) return parsed; } catch { /* ignore */ }
+      return [val];
+    }
+    return undefined;
+  },
+  z.array(z.string()).optional()
+);
 
 export const GetAccountsSchema = z.object({
   tenantId: tenantIdRequired,
@@ -50,7 +61,13 @@ export const GetCampaignsSchema = z.object({
   ...actorFields,
   accountId: z.string(),
   limit: z.number().optional().default(50),
-  status: z.array(z.string()).optional(),
+  status: coerceStringArray,
+});
+
+export const GetCampaignByIdSchema = z.object({
+  tenantId: tenantIdRequired,
+  ...actorFields,
+  campaignId: z.string(),
 });
 
 export const CreateCampaignSchema = z.object({
@@ -125,7 +142,7 @@ export const GetAdSetsSchema = z.object({
   ...actorFields,
   campaignId: z.string(),
   limit: z.number().optional().default(50),
-  status: z.array(z.string()).optional(),
+  status: coerceStringArray,
 });
 
 export const CreateAdSetSchema = z.object({
@@ -190,7 +207,7 @@ export const GetAdsSchema = z.object({
   adSetId: z.string().optional(),
   campaignId: z.string().optional(),
   limit: z.number().optional().default(50),
-  status: z.array(z.string()).optional(),
+  status: coerceStringArray,
 });
 
 export const CreateAdSchema = z.object({
@@ -428,6 +445,18 @@ export const tools: Tool[] = [
         status: { type: 'array', items: { type: 'string' } },
       },
       required: ['tenantId', 'accountId'],
+    },
+  },
+  {
+    name: 'get_campaign_by_id',
+    description: 'Retrieve a single campaign by its ID (includes account_id for ownership verification)',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tenantId: { type: 'string', description: 'Tenant ID for authorization and isolation checks' },
+        campaignId: { type: 'string', description: 'Campaign ID to fetch' },
+      },
+      required: ['tenantId', 'campaignId'],
     },
   },
   {
@@ -711,6 +740,7 @@ export const toolSchemas = {
   list_tenant_pages: ListTenantPagesSchema,
   set_default_page_for_ad_account: SetDefaultPageForAdAccountSchema,
   get_campaigns: GetCampaignsSchema,
+  get_campaign_by_id: GetCampaignByIdSchema,
   create_campaign: CreateCampaignSchema,
   update_campaign: UpdateCampaignSchema,
   get_insights: GetInsightsSchema,

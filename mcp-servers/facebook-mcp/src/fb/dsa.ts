@@ -451,9 +451,15 @@ export class DsaService {
       businessVerified,
     });
 
+    const country = adAccount?.timezoneName
+      ? this.inferCountryFromTimezone(adAccount.timezoneName)
+      : undefined;
+
     return {
       beneficiary,
       payer,
+      source: 'META' as const,
+      fetchedAt: new Date().toISOString(),
       meta: {
         business: business
           ? {
@@ -468,6 +474,7 @@ export class DsaService {
               name: adAccount.name,
               currency: adAccount.currency,
               timezone_name: adAccount.timezoneName,
+              country,
             }
           : undefined,
         page: page
@@ -478,6 +485,35 @@ export class DsaService {
           : undefined,
       },
     };
+  }
+
+  private inferCountryFromTimezone(timezone: string): string | undefined {
+    const tzCountryMap: Record<string, string> = {
+      'Europe/Bucharest': 'RO',
+      'Europe/Berlin': 'DE',
+      'Europe/Paris': 'FR',
+      'Europe/London': 'GB',
+      'Europe/Rome': 'IT',
+      'Europe/Madrid': 'ES',
+      'Europe/Amsterdam': 'NL',
+      'Europe/Warsaw': 'PL',
+      'Europe/Lisbon': 'PT',
+      'Europe/Athens': 'GR',
+      'Europe/Budapest': 'HU',
+      'Europe/Prague': 'CZ',
+      'Europe/Vienna': 'AT',
+      'Europe/Brussels': 'BE',
+      'Europe/Dublin': 'IE',
+      'Europe/Stockholm': 'SE',
+      'Europe/Copenhagen': 'DK',
+      'Europe/Helsinki': 'FI',
+      'Europe/Oslo': 'NO',
+      'America/New_York': 'US',
+      'America/Chicago': 'US',
+      'America/Denver': 'US',
+      'America/Los_Angeles': 'US',
+    };
+    return tzCountryMap[timezone];
   }
 
   private async persistDsaSettings(

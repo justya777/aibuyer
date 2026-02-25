@@ -380,6 +380,7 @@ export interface DsaAutofillAdAccountMeta {
   name: string;
   currency?: string;
   timezone_name?: string;
+  country?: string;
 }
 
 export interface DsaAutofillPageMeta {
@@ -396,6 +397,8 @@ export interface GetDsaAutofillSuggestionsParams extends TenantRequired {
 export interface DsaAutofillSuggestionsResult {
   beneficiary: DsaAutofillSuggestion<DsaAutofillBeneficiarySource>;
   payer: DsaAutofillSuggestion<DsaAutofillPayerSource>;
+  source?: 'META';
+  fetchedAt?: string;
   meta: {
     business?: DsaAutofillBusinessMeta;
     adAccount?: DsaAutofillAdAccountMeta;

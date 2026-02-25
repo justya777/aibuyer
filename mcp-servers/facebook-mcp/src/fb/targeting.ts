@@ -242,15 +242,19 @@ export class TargetingApi {
 
   private async resolveLocales(ctx: RequestContext, locales: Array<number | string>): Promise<number[]> {
     const localeIds: number[] = [];
+    const resolved: Array<{ input: string | number; id: number; name?: string }> = [];
+
     for (const locale of locales) {
       if (typeof locale === 'number') {
         localeIds.push(locale);
+        resolved.push({ input: locale, id: locale });
         continue;
       }
 
       const asNumber = Number.parseInt(locale, 10);
       if (Number.isFinite(asNumber) && asNumber.toString() === locale) {
         localeIds.push(asNumber);
+        resolved.push({ input: locale, id: asNumber });
         continue;
       }
 
@@ -261,15 +265,22 @@ export class TargetingApi {
           query: {
             type: 'adlocale',
             q: locale,
-            limit: 1,
+            limit: 5,
           },
         });
-        const first = response.data.data?.[0];
+        const results = response.data.data ?? [];
+        const first = results[0];
         if (first?.key) {
           const parsed = Number.parseInt(first.key, 10);
           if (Number.isFinite(parsed)) {
             localeIds.push(parsed);
+            resolved.push({ input: locale, id: parsed, name: first.name });
           }
+        } else {
+          logger.warn(`No locale results from Meta for "${locale}"`, {
+            tenantId: ctx.tenantId,
+            candidates: results.slice(0, 3).map((r) => ({ key: r.key, name: r.name })),
+          });
         }
       } catch (error) {
         logger.warn(`Unable to resolve Facebook locale "${locale}"`, {
@@ -278,6 +289,13 @@ export class TargetingApi {
         });
       }
     }
+
+    logger.info('Resolved locales', {
+      tenantId: ctx.tenantId,
+      input: locales,
+      resolved,
+    });
+
     return localeIds;
   }
 }

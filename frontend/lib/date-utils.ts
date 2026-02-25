@@ -2,20 +2,20 @@
 // Always use consistent formatting between server and client
 
 export const formatDate = (date: Date | string, locale = 'en-US'): string => {
-  const parsed = new Date(date);
-  if (Number.isNaN(parsed.getTime())) return '--/--/----';
+  const parsed = toValidDate(date);
+  if (!parsed) return '--/--/----';
   return parsed.toLocaleDateString(locale);
 };
 
 export const formatTime = (date: Date | string, locale = 'en-US'): string => {
-  const parsed = new Date(date);
-  if (Number.isNaN(parsed.getTime())) return '--:--:--';
+  const parsed = toValidDate(date);
+  if (!parsed) return '--:--:--';
   return parsed.toLocaleTimeString(locale);
 };
 
 export const formatDateTime = (date: Date | string, locale = 'en-US'): string => {
-  const parsed = new Date(date);
-  if (Number.isNaN(parsed.getTime())) return '--';
+  const parsed = toValidDate(date);
+  if (!parsed) return '--';
   return parsed.toLocaleString(locale);
 };
 
@@ -37,3 +37,16 @@ export const safeTimeFormat = (date: Date | string | null | undefined, locale = 
     return '-';
   }
 };
+
+export const toIsoDateString = (date: Date | string | null | undefined): string | null => {
+  if (!date) return null;
+  const parsed = toValidDate(date);
+  if (!parsed) return null;
+  return parsed.toISOString();
+};
+
+function toValidDate(value: Date | string): Date | null {
+  const parsed = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed;
+}

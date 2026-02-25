@@ -8,6 +8,7 @@ type SessionStatus = 'pending' | 'running' | 'completed' | 'error';
 
 export interface ExecutionSession {
   id: string;
+  runId?: string;
   userId: string;
   tenantId: string;
   command: string;
@@ -37,6 +38,7 @@ function getStore(): Map<string, ExecutionSession> {
 }
 
 export function createExecutionSession(input: {
+  runId?: string;
   userId: string;
   tenantId: string;
   command: string;
@@ -49,6 +51,7 @@ export function createExecutionSession(input: {
   const now = new Date().toISOString();
   const session: ExecutionSession = {
     id: crypto.randomUUID(),
+    runId: input.runId,
     userId: input.userId,
     tenantId: input.tenantId,
     command: input.command,

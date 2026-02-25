@@ -1,15 +1,39 @@
 'use client'
 
-import { useState, useRef, useCallback } from 'react'
-import { useDropzone } from 'react-dropzone'
-import type { ExecutionStep, ExecutionSummary, FacebookAccount } from '@/lib/shared-types'
-import { 
+import { useCallback, useEffect, useRef, useState } from 'react'
+import type {
+  CreatedEntityIds,
+  ExecutionStep,
+  ExecutionSummary,
+  FacebookAccount,
+} from '@/lib/shared-types'
+import { buildStepFromSsePayload, parseTimelineDonePayload } from '@/lib/ai-execution/sse-events'
+import AIExecutionTimeline from './AIExecutionTimeline'
+import {
+  ArrowPathIcon,
+  ClockIcon,
+  Cog6ToothIcon,
+  CommandLineIcon,
+  DocumentTextIcon,
   PaperAirplaneIcon,
+  PhotoIcon,
   SparklesIcon,
   ExclamationTriangleIcon,
-  PaperClipIcon,
-  XMarkIcon
+  InformationCircleIcon,
+  CheckCircleIcon,
+  XMarkIcon,
 } from '@heroicons/react/24/outline'
+
+const TAB_STORAGE_KEY = 'ai-panel-tab'
+type TabId = 'command' | 'timeline' | 'materials' | 'history' | 'settings'
+
+const TABS: { id: TabId; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
+  { id: 'command', label: 'Command', icon: CommandLineIcon },
+  { id: 'timeline', label: 'Timeline', icon: ClockIcon },
+  { id: 'materials', label: 'Materials', icon: PhotoIcon },
+  { id: 'history', label: 'History', icon: DocumentTextIcon },
+  { id: 'settings', label: 'Settings', icon: Cog6ToothIcon },
+]
 
 interface AICommandCenterProps {
   selectedAccount: FacebookAccount | null
@@ -32,24 +56,25 @@ interface AICommandCenterProps {
   onExecutionReset: () => void
   onStepUpdate: (step: ExecutionStep) => void
   onSummary: (summary: ExecutionSummary) => void
+  onExecutionComplete?: (result: { success: boolean; createdIds?: CreatedEntityIds }) => void
+  onCampaignCreated?: (campaignId: string) => void
 }
 
 type BlockingAction =
-  | {
-      type: 'OPEN_DSA_SETTINGS'
-      tenantId?: string
-      adAccountId?: string
-    }
-  | {
-      type: 'OPEN_DEFAULT_PAGE_SETTINGS'
-      tenantId?: string
-      adAccountId?: string
-    }
-  | {
-      type: 'RESOLVE_PAYMENT_METHOD'
-      tenantId?: string
-      adAccountId?: string
-    };
+  | { type: 'OPEN_DSA_SETTINGS'; tenantId?: string; adAccountId?: string }
+  | { type: 'OPEN_DEFAULT_PAGE_SETTINGS'; tenantId?: string; adAccountId?: string }
+  | { type: 'RESOLVE_PAYMENT_METHOD'; tenantId?: string; adAccountId?: string };
+
+interface HistoryRun {
+  id: string
+  commandText: string
+  status: string
+  startedAt: string
+  finishedAt?: string | null
+  createdIdsJson?: Record<string, unknown> | null
+  summaryJson?: Record<string, unknown> | null
+  retries?: number
+}
 
 export default function AICommandCenter({
   selectedAccount,
@@ -64,80 +89,90 @@ export default function AICommandCenter({
   onExecutionReset,
   onStepUpdate,
   onSummary,
+  onExecutionComplete,
+  onCampaignCreated,
 }: AICommandCenterProps) {
   const COMMAND_TIMEOUT_MS = 120000
+  const [activeTab, setActiveTab] = useState<TabId>(() => {
+    if (typeof window !== 'undefined') {
+      const stored = localStorage.getItem(TAB_STORAGE_KEY)
+      if (stored && TABS.some((t) => t.id === stored)) return stored as TabId
+    }
+    return 'command'
+  })
   const [command, setCommand] = useState('')
+  const [lastCommand, setLastCommand] = useState<string | null>(null)
   const [isProcessing, setIsProcessing] = useState(false)
-  const [uploadedFiles, setUploadedFiles] = useState<any[]>([])
-  const [showUploadZone, setShowUploadZone] = useState(false)
   const [blockingMessage, setBlockingMessage] = useState<string | null>(null)
   const [blockingAction, setBlockingAction] = useState<BlockingAction | null>(null)
+  const [showBillingInstructions, setShowBillingInstructions] = useState(false)
+  const [toast, setToast] = useState<{ message: string; campaignId?: string } | null>(null)
+  const [historyRuns, setHistoryRuns] = useState<HistoryRun[]>([])
+  const [historyLoading, setHistoryLoading] = useState(false)
   const [suggestions] = useState([
-    // Campaign operations with targeting - Updated objectives
     'Create a leads campaign for Romanian men on romanian language aged 20-45 interested in investments with $15 daily budget with the link https://domain.com/test?utm_campaign={{campaign.name}}&utm_source={{site_source_name}}',
-    // 'Create a traffic campaign for US users aged 25-45 interested in technology with $20 daily budget',
-    // 'Create a sales campaign for European small business owners aged 30-55 with $25 daily budget',
-    // 'Activate all campaigns',
-    // 'Pause all campaigns with CTR below 1%',
-    // 'Create leads campaign with 2 ads - use pr.mp4 for first ad, man.jpeg for 2nd for Romanian men on romanian language aged 20-45 interested in investments with $15 daily budget with the link https://domain.com/test?utm_campaign={{campaign.name}}&utm_source={{site_source_name}}',
-
   ])
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
-  // File upload handling
-  const onDrop = useCallback(async (acceptedFiles: File[]) => {
-    for (const file of acceptedFiles) {
-      const formData = new FormData();
-      formData.append('file', file);
-      formData.append('adName', selectedAccount?.name || 'ai-command');
-      formData.append('type', file.type.startsWith('image/') ? 'image' : 'video');
-
-      try {
-        const response = await fetch('/api/upload-materials', {
-          method: 'POST',
-          body: formData,
-        });
-
-        const result = await response.json();
-        if (result.success) {
-          setUploadedFiles(prev => [...prev, {
-            ...result.material,
-            file: file
-          }]);
-        } else {
-          setBlockingMessage(`Material upload failed for ${file.name}.`);
-        }
-      } catch (error) {
-        setBlockingMessage(error instanceof Error ? error.message : 'Material upload failed.');
-      }
+  const switchTab = useCallback((tab: TabId) => {
+    setActiveTab(tab)
+    if (typeof window !== 'undefined') {
+      localStorage.setItem(TAB_STORAGE_KEY, tab)
     }
-  }, [selectedAccount]);
+  }, [])
 
-  const { getRootProps, getInputProps, isDragActive } = useDropzone({
-    onDrop,
-    maxFiles: 5,
-    accept: {
-      'image/jpeg': ['.jpg', '.jpeg'],
-      'image/png': ['.png'],
-      'image/gif': ['.gif'],
-      'video/mp4': ['.mp4'],
-      'video/mov': ['.mov']
-    },
-    disabled: !selectedAccount
-  });
+  useEffect(() => {
+    if (isProcessing && activeTab !== 'timeline') {
+      switchTab('timeline')
+    }
+  }, [isProcessing, activeTab, switchTab])
 
-  const removeFile = (fileId: string) => {
-    setUploadedFiles(prev => prev.filter(f => f.id !== fileId));
-  };
+  const dismissToast = useCallback(() => setToast(null), [])
+
+  useEffect(() => {
+    if (toast) {
+      const timer = setTimeout(dismissToast, 15000)
+      return () => clearTimeout(timer)
+    }
+  }, [toast, dismissToast])
+
+  const fetchHistory = useCallback(async () => {
+    if (!selectedAccount) return
+    setHistoryLoading(true)
+    try {
+      const params = new URLSearchParams({ adAccountId: selectedAccount.id })
+      if (selectedBusinessId) params.set('businessId', selectedBusinessId)
+      const res = await fetch(`/api/ai-command/runs?${params}`, {
+        headers: selectedTenantId ? { 'x-tenant-id': selectedTenantId } : {},
+      })
+      if (res.ok) {
+        const data = await res.json()
+        setHistoryRuns(data.runs || [])
+      }
+    } catch {
+      // Silently fail
+    } finally {
+      setHistoryLoading(false)
+    }
+  }, [selectedAccount, selectedBusinessId, selectedTenantId])
+
+  useEffect(() => {
+    if (activeTab === 'history') fetchHistory()
+  }, [activeTab, fetchHistory])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!command.trim() || !selectedAccount || !selectedBusinessId) return
+    await executeCommand(command.trim())
+  }
+
+  const executeCommand = async (nextCommand: string) => {
+    if (!nextCommand || !selectedAccount || !selectedBusinessId) return
 
     onExecutionReset()
     setBlockingMessage(null)
     setBlockingAction(null)
     setIsProcessing(true)
+    setLastCommand(nextCommand)
 
     try {
       const response = await fetch('/api/ai-command', {
@@ -147,7 +182,7 @@ export default function AICommandCenter({
           ...(selectedTenantId ? { 'x-tenant-id': selectedTenantId } : {}),
         },
         body: JSON.stringify({
-          command: command,
+          command: nextCommand,
           accountId: selectedAccount.id,
           businessId: selectedBusinessId,
         }),
@@ -197,7 +232,9 @@ export default function AICommandCenter({
       setBlockingMessage(null)
       setBlockingAction(null)
       await consumeExecutionStream(result.executionId)
-      setCommand('')
+      if (nextCommand === command.trim()) {
+        setCommand('')
+      }
     } catch (error) {
       const displayError =
         error instanceof Error && error.name === 'AbortError'
@@ -214,6 +251,7 @@ export default function AICommandCenter({
         finalStatus: 'error',
         finalMessage: displayError,
       })
+      onExecutionComplete?.({ success: false })
     } finally {
       setIsProcessing(false)
     }
@@ -222,17 +260,34 @@ export default function AICommandCenter({
   const consumeExecutionStream = async (executionId: string) => {
     await new Promise<void>((resolve, reject) => {
       const source = new EventSource(`/api/ai-command/stream?executionId=${encodeURIComponent(executionId)}`)
+      let settled = false
+      const finish = () => {
+        if (settled) return
+        settled = true
+        source.close()
+        resolve()
+      }
+      const fail = (error: Error) => {
+        if (settled) return
+        settled = true
+        source.close()
+        reject(error)
+      }
+      const handleStepPayload = (raw: string) => {
+        const payload = JSON.parse(raw)
+        const step = buildStepFromSsePayload(payload)
+        if (step) onStepUpdate(step)
+      }
 
-      source.addEventListener('step_update', (event) => {
-        try {
-          const payload = JSON.parse((event as MessageEvent).data)
-          if (payload?.type === 'step_update' && payload.step) {
-            onStepUpdate(payload.step)
+      for (const eventType of ['step.start', 'step.update', 'step.success', 'step.error']) {
+        source.addEventListener(eventType, (event) => {
+          try {
+            handleStepPayload((event as MessageEvent).data)
+          } catch {
+            // Parse error, non-critical
           }
-        } catch (parseError) {
-          setBlockingMessage('Step update stream parse error.')
-        }
-      })
+        })
+      }
 
       source.addEventListener('execution_summary', (event) => {
         try {
@@ -240,8 +295,25 @@ export default function AICommandCenter({
           if (payload?.type === 'execution_summary' && payload.summary) {
             onSummary(payload.summary)
           }
-        } catch (parseError) {
-          setBlockingMessage('Execution summary stream parse error.')
+        } catch {
+          // Parse error
+        }
+      })
+
+      source.addEventListener('timeline.done', (event) => {
+        try {
+          const parsed = parseTimelineDonePayload(JSON.parse((event as MessageEvent).data))
+          if (parsed.summary) onSummary(parsed.summary)
+          const success = parsed.success
+          const createdIds = parsed.createdIds
+          onExecutionComplete?.({ success, createdIds })
+          if (success && createdIds?.campaignId) {
+            setToast({ message: 'Campaign created successfully!', campaignId: createdIds.campaignId })
+            onCampaignCreated?.(createdIds.campaignId)
+          }
+          finish()
+        } catch (error) {
+          fail(error instanceof Error ? error : new Error('Timeline done parse error'))
         }
       })
 
@@ -271,28 +343,13 @@ export default function AICommandCenter({
           } else {
             setBlockingAction(null)
           }
-        } catch (parseError) {
+        } catch {
           setBlockingMessage('Execution error stream parse error.')
         }
       })
 
-      source.addEventListener('done', (event) => {
-        try {
-          const payload = JSON.parse((event as MessageEvent).data)
-          if (payload?.type === 'done' && payload.summary) {
-            onSummary(payload.summary)
-          }
-          source.close()
-          resolve()
-        } catch (parseError) {
-          source.close()
-          reject(parseError)
-        }
-      })
-
       source.onerror = () => {
-        source.close()
-        reject(new Error('Execution stream disconnected unexpectedly.'))
+        fail(new Error('Execution stream disconnected unexpectedly.'))
       }
     })
   }
@@ -304,162 +361,222 @@ export default function AICommandCenter({
 
   return (
     <div className="h-full flex flex-col">
-      <div className="mb-4">
-        <div className="flex items-center space-x-2 mb-2">
-          <SparklesIcon className="w-5 h-5 text-facebook-600" />
-          <h3 className="text-lg font-semibold text-gray-900">AI Command Center</h3>
-        </div>
-        {selectedAccount ? (
-          <div className="mt-2 rounded-md border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700">
-            <p>
-              <span className="font-semibold">Current account:</span> {selectedAccount.name}
-            </p>
-            <p>
-              <span className="font-semibold">Default page:</span> {accountContext?.defaultPageId || 'Not set'}
-            </p>
-            <p>
-              <span className="font-semibold">DSA:</span> {accountContext?.dsaConfigured ? 'Configured' : 'Missing'}
-            </p>
-            <div className="mt-2 flex flex-wrap gap-2">
-              <HealthChip label="Billing OK" ok={accountContext?.health?.billingOk ?? false} />
-              <HealthChip label="DSA OK" ok={accountContext?.health?.dsaOk ?? false} />
-              <HealthChip label="Page Connected" ok={accountContext?.health?.pageConnected ?? false} />
-            </div>
-          </div>
-        ) : null}
+      {/* Header */}
+      <div className="mb-3 flex items-center space-x-2">
+        <SparklesIcon className="w-5 h-5 text-facebook-600" />
+        <h3 className="text-lg font-semibold text-gray-900">AI Command Center</h3>
       </div>
 
-      {(isProcessing || executionSteps.length > 0 || Boolean(executionSummary)) && (
-        <ExecutionProgress
-          isProcessing={isProcessing}
-          steps={executionSteps}
-          summary={executionSummary}
-        />
-      )}
-
-      {!selectedBusinessId && (
-        <div className="mb-4 p-3 bg-yellow-50 border border-yellow-200 rounded-md">
-          <div className="flex">
-            <ExclamationTriangleIcon className="w-5 h-5 text-yellow-400 mr-2 flex-shrink-0" />
-            <p className="text-sm text-yellow-700">
-              Select a Business Portfolio to start giving commands.
-            </p>
-          </div>
-        </div>
-      )}
-      {selectedBusinessId && !selectedAccount && (
-        <div className="mb-4 p-3 bg-yellow-50 border border-yellow-200 rounded-md">
-          <div className="flex">
-            <ExclamationTriangleIcon className="w-5 h-5 text-yellow-400 mr-2 flex-shrink-0" />
-            <p className="text-sm text-yellow-700">Select an Ad Account for this Business Portfolio.</p>
-          </div>
-        </div>
-      )}
-      {selectedBusinessId && selectedAccount && requiresDefaultPage && (
-        <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-md">
-          <div className="flex items-start justify-between gap-3">
-            <p className="text-sm text-amber-800">
-              No default Page is set for this Ad Account. Lead or link objectives require a default Page.
-            </p>
+      {/* Tab bar */}
+      <div className="mb-3 flex border-b border-gray-200">
+        {TABS.map((tab) => {
+          const Icon = tab.icon
+          const isActive = activeTab === tab.id
+          return (
             <button
+              key={tab.id}
               type="button"
-              className="text-xs px-2 py-1 border border-amber-300 rounded text-amber-800 hover:bg-amber-100"
-              onClick={() => onNavigateToDefaultPage?.()}
+              onClick={() => switchTab(tab.id)}
+              className={`flex items-center gap-1.5 px-3 py-2 text-xs font-medium border-b-2 transition-colors ${
+                isActive
+                  ? 'border-facebook-600 text-facebook-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+              }`}
             >
-              Set default Page
+              <Icon className="w-3.5 h-3.5" />
+              {tab.label}
             </button>
+          )
+        })}
+      </div>
+
+      {/* Toast notification */}
+      {toast && (
+        <div className="mb-3 flex items-center justify-between gap-2 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2">
+          <div className="flex items-center gap-2">
+            <CheckCircleIcon className="h-4 w-4 text-emerald-600" />
+            <span className="text-sm text-emerald-800">{toast.message}</span>
+            {toast.campaignId && (
+              <button
+                type="button"
+                className="ml-2 text-xs font-medium text-emerald-700 underline hover:text-emerald-900"
+                onClick={() => {
+                  onCampaignCreated?.(toast.campaignId!)
+                  dismissToast()
+                }}
+              >
+                View campaign
+              </button>
+            )}
+          </div>
+          <button type="button" onClick={dismissToast} className="text-emerald-500 hover:text-emerald-700">
+            <XMarkIcon className="h-4 w-4" />
+          </button>
+        </div>
+      )}
+
+      {/* Tab content */}
+      <div className="flex-1 overflow-auto">
+        {activeTab === 'command' && (
+          <CommandTab
+            command={command}
+            setCommand={setCommand}
+            lastCommand={lastCommand}
+            isProcessing={isProcessing}
+            selectedAccount={selectedAccount}
+            selectedBusinessId={selectedBusinessId}
+            blockingMessage={blockingMessage}
+            blockingAction={blockingAction}
+            suggestions={suggestions}
+            textareaRef={textareaRef}
+            executionSteps={executionSteps}
+            executionSummary={executionSummary}
+            onSubmit={handleSubmit}
+            onExecuteCommand={executeCommand}
+            onSuggestionClick={handleSuggestionClick}
+            setShowBillingInstructions={setShowBillingInstructions}
+            showBillingInstructions={showBillingInstructions}
+            accountContext={accountContext}
+          />
+        )}
+
+        {activeTab === 'timeline' && (
+          <AIExecutionTimeline
+            steps={executionSteps}
+            summary={executionSummary}
+            showTechnicalDetails
+          />
+        )}
+
+        {activeTab === 'materials' && (
+          <div className="text-center py-8 border border-dashed border-gray-300 rounded-lg">
+            <PhotoIcon className="w-12 h-12 text-gray-300 mx-auto mb-3" />
+            <p className="text-gray-500">Materials</p>
+            <p className="text-sm text-gray-400 mt-1">
+              Upload and manage creative materials for your ads.
+            </p>
+          </div>
+        )}
+
+        {activeTab === 'history' && (
+          <HistoryTab
+            runs={historyRuns}
+            loading={historyLoading}
+            onRefresh={fetchHistory}
+            onRunAgain={(cmd) => {
+              setCommand(cmd)
+              switchTab('command')
+            }}
+            selectedTenantId={selectedTenantId}
+          />
+        )}
+
+        {activeTab === 'settings' && (
+          <SettingsTab
+            selectedAccount={selectedAccount}
+            accountContext={accountContext}
+            requiresDefaultPage={requiresDefaultPage}
+            showBillingInstructions={showBillingInstructions}
+            setShowBillingInstructions={setShowBillingInstructions}
+            onNavigateToDefaultPage={onNavigateToDefaultPage}
+            onNavigateToDsaSettings={onNavigateToDsaSettings}
+          />
+        )}
+      </div>
+
+      {/* Processing indicator - always visible */}
+      {isProcessing && (
+        <div className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded-md">
+          <div className="flex items-center space-x-2">
+            <div className="w-4 h-4 border-2 border-facebook-600 border-t-transparent rounded-full animate-spin" />
+            <p className="text-sm text-blue-700">AI is processing your command...</p>
           </div>
         </div>
       )}
-      {selectedBusinessId &&
-      selectedAccount &&
-      blockingAction?.type === 'RESOLVE_PAYMENT_METHOD' ? (
-        <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-md">
-          <p className="text-sm text-amber-800">
-            {blockingMessage ||
-              'A valid payment method is required for this ad account before creating ads.'}
-          </p>
-        </div>
-      ) : null}
-      {selectedBusinessId &&
-      selectedAccount &&
-      blockingAction?.type === 'OPEN_DSA_SETTINGS' ? (
-        <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-md">
-          <div className="flex items-start justify-between gap-3">
-            <p className="text-sm text-amber-800">
-              {blockingMessage ||
-                'DSA settings are required for EU-targeted campaigns on this ad account.'}
-            </p>
-            <button
-              type="button"
-              className="text-xs px-2 py-1 border border-amber-300 rounded text-amber-800 hover:bg-amber-100"
-              onClick={() =>
-                onNavigateToDsaSettings?.(
-                  blockingAction.adAccountId || selectedAccount.id
-                )
-              }
-            >
-              Open DSA settings
-            </button>
-          </div>
-        </div>
-      ) : null}
+    </div>
+  )
+}
 
-      {showUploadZone && selectedAccount && (
-        <div className="mb-4 p-4 border-2 border-dashed border-gray-300 rounded-lg bg-gray-50">
-          <div {...getRootProps()} className={`cursor-pointer p-4 text-center rounded transition-colors ${
-            isDragActive ? 'border-blue-400 bg-blue-50' : 'hover:bg-gray-100'
-          }`}>
-            <input {...getInputProps()} />
-            <PaperClipIcon className="h-8 w-8 text-gray-400 mx-auto mb-2" />
-            <p className="text-sm text-gray-600">
-              {isDragActive 
-                ? 'Drop files here...' 
-                : 'Drag & drop materials or click to upload'
-              }
-            </p>
-            <p className="text-xs text-gray-500 mt-1">
-              JPG, PNG, GIF, MP4, MOV (max 5 files)
-            </p>
-          </div>
+/* ------------------------------------------------------------------ */
+/* Command Tab                                                        */
+/* ------------------------------------------------------------------ */
 
-          {/* Uploaded Files List */}
-          {uploadedFiles.length > 0 && (
-            <div className="mt-4 space-y-2">
-              <h4 className="text-sm font-medium text-gray-700">Uploaded Files:</h4>
-              {uploadedFiles.map((file) => (
-                <div key={file.id} className="flex items-center justify-between p-2 bg-white border rounded">
-                  <div className="flex items-center space-x-2">
-                    <div className="w-2 h-2 bg-green-500 rounded-full"></div>
-                    <span className="text-sm font-medium">{file.originalName}</span>
-                    <span className="text-xs text-gray-500">({file.category.toUpperCase()})</span>
-                  </div>
-                  <button
-                    onClick={() => removeFile(file.id)}
-                    className="text-gray-400 hover:text-red-500"
-                  >
-                    <XMarkIcon className="h-4 w-4" />
-                  </button>
-                </div>
-              ))}
+function CommandTab({
+  command,
+  setCommand,
+  lastCommand,
+  isProcessing,
+  selectedAccount,
+  selectedBusinessId,
+  blockingMessage,
+  blockingAction,
+  suggestions,
+  textareaRef,
+  executionSteps,
+  executionSummary,
+  onSubmit,
+  onExecuteCommand,
+  onSuggestionClick,
+  setShowBillingInstructions,
+  showBillingInstructions,
+  accountContext,
+}: {
+  command: string
+  setCommand: (v: string) => void
+  lastCommand: string | null
+  isProcessing: boolean
+  selectedAccount: FacebookAccount | null
+  selectedBusinessId?: string | null
+  blockingMessage: string | null
+  blockingAction: BlockingAction | null
+  suggestions: string[]
+  textareaRef: React.Ref<HTMLTextAreaElement>
+  executionSteps: ExecutionStep[]
+  executionSummary: ExecutionSummary | null
+  onSubmit: (e: React.FormEvent) => void
+  onExecuteCommand: (cmd: string) => void
+  onSuggestionClick: (s: string) => void
+  setShowBillingInstructions: (v: boolean) => void
+  showBillingInstructions: boolean
+  accountContext?: AICommandCenterProps['accountContext']
+}) {
+  return (
+    <div className="space-y-4">
+      {/* Blocking errors */}
+      {blockingMessage && (
+        <div className="p-3 bg-amber-50 border border-amber-200 rounded-md">
+          <div className="flex items-start gap-2">
+            <ExclamationTriangleIcon className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" />
+            <div className="text-sm text-amber-800">
+              <p>{blockingMessage}</p>
+              {blockingAction?.type === 'RESOLVE_PAYMENT_METHOD' && (
+                <p className="mt-1 text-xs">
+                  Go to Meta Ads Manager &rarr; Billing &amp; payments, add/confirm a payment method, then retry.
+                </p>
+              )}
             </div>
-          )}
+          </div>
         </div>
       )}
 
-      <form onSubmit={handleSubmit} className="mb-4">
+      {/* Execution progress bar */}
+      {(isProcessing || executionSteps.length > 0 || Boolean(executionSummary)) && (
+        <ExecutionProgress isProcessing={isProcessing} steps={executionSteps} summary={executionSummary} />
+      )}
+
+      {/* Command input */}
+      <form onSubmit={onSubmit}>
         <div className="relative">
           <textarea
             ref={textareaRef}
             value={command}
             onChange={(e) => setCommand(e.target.value)}
-            placeholder={selectedBusinessId && selectedAccount
-              ? uploadedFiles.length > 0
-                ? `e.g., Create campaigns using ${uploadedFiles.map(f => f.originalName).join(', ')} - specify which files to use for each adset`
-                : "e.g., Create a traffic campaign for Romanian users aged 25-45 interested in fitness with $50 daily budget"
-              : !selectedBusinessId
-                ? "Select a Business Portfolio to start..."
-                : "Select an Ad Account to start..."
+            placeholder={
+              selectedBusinessId && selectedAccount
+                ? 'e.g., Create a traffic campaign for Romanian users aged 25-45 interested in fitness with $50 daily budget'
+                : !selectedBusinessId
+                  ? 'Select a Business Portfolio to start...'
+                  : 'Select an Ad Account to start...'
             }
             disabled={!selectedBusinessId || !selectedAccount || isProcessing}
             className="w-full p-3 pr-20 border border-gray-300 rounded-md resize-none focus:ring-2 focus:ring-facebook-500 focus:border-facebook-500 disabled:bg-gray-50 disabled:text-gray-500"
@@ -467,21 +584,12 @@ export default function AICommandCenter({
           />
           <div className="absolute bottom-2 right-2 flex items-center space-x-1">
             <button
-              type="button"
-              onClick={() => setShowUploadZone(!showUploadZone)}
-              disabled={!selectedBusinessId || !selectedAccount}
-              className="p-2 text-gray-400 hover:text-gray-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-              title="Upload materials"
-            >
-              <PaperClipIcon className="w-4 h-4" />
-            </button>
-            <button
               type="submit"
               disabled={!command.trim() || !selectedBusinessId || !selectedAccount || isProcessing}
               className="p-2 bg-facebook-600 text-white rounded-md hover:bg-facebook-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
               {isProcessing ? (
-                <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
               ) : (
                 <PaperAirplaneIcon className="w-4 h-4" />
               )}
@@ -490,13 +598,27 @@ export default function AICommandCenter({
         </div>
       </form>
 
-      <div className="flex-1 overflow-auto">
-        <h4 className="text-sm font-medium text-gray-700 mb-3">Quick Commands</h4>
+      {/* Retry last */}
+      {lastCommand && (
+        <button
+          type="button"
+          disabled={isProcessing}
+          className="inline-flex items-center gap-1 rounded-md border border-slate-300 px-2 py-1 text-xs text-slate-700 hover:bg-slate-50 disabled:opacity-60"
+          onClick={() => onExecuteCommand(lastCommand)}
+        >
+          <ArrowPathIcon className="h-4 w-4" />
+          Retry last command
+        </button>
+      )}
+
+      {/* Quick Commands - always visible */}
+      <div>
+        <h4 className="text-sm font-medium text-gray-700 mb-2">Quick Commands</h4>
         <div className="space-y-2">
           {suggestions.map((suggestion, index) => (
             <button
               key={index}
-              onClick={() => handleSuggestionClick(suggestion)}
+              onClick={() => onSuggestionClick(suggestion)}
               disabled={!selectedBusinessId || !selectedAccount || isProcessing}
               className="w-full text-left p-3 text-sm bg-gray-50 hover:bg-gray-100 border border-gray-200 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
@@ -505,20 +627,318 @@ export default function AICommandCenter({
           ))}
         </div>
       </div>
+    </div>
+  )
+}
 
-      {isProcessing && (
-        <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-md">
-          <div className="flex items-center space-x-2">
-            <div className="w-4 h-4 border-2 border-facebook-600 border-t-transparent rounded-full animate-spin"></div>
-            <p className="text-sm text-blue-700">
-              AI is processing your command...
-            </p>
-          </div>
+/* ------------------------------------------------------------------ */
+/* History Tab                                                        */
+/* ------------------------------------------------------------------ */
+
+function HistoryTab({
+  runs,
+  loading,
+  onRefresh,
+  onRunAgain,
+  selectedTenantId,
+}: {
+  runs: HistoryRun[]
+  loading: boolean
+  onRefresh: () => void
+  onRunAgain: (command: string) => void
+  selectedTenantId?: string | null
+}) {
+  const [expandedRunId, setExpandedRunId] = useState<string | null>(null)
+  const [runEvents, setRunEvents] = useState<any[]>([])
+  const [eventsLoading, setEventsLoading] = useState(false)
+  const [copiedId, setCopiedId] = useState<string | null>(null)
+
+  const fetchRunEvents = async (runId: string) => {
+    if (expandedRunId === runId) {
+      setExpandedRunId(null)
+      return
+    }
+    setExpandedRunId(runId)
+    setEventsLoading(true)
+    try {
+      const res = await fetch(`/api/ai-command/runs/${runId}/events`, {
+        headers: selectedTenantId ? { 'x-tenant-id': selectedTenantId } : {},
+      })
+      if (res.ok) {
+        const data = await res.json()
+        setRunEvents(data.events || [])
+      }
+    } catch {
+      setRunEvents([])
+    } finally {
+      setEventsLoading(false)
+    }
+  }
+
+  const copyToClipboard = async (text: string, id: string) => {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopiedId(id)
+      setTimeout(() => setCopiedId(null), 2000)
+    } catch {
+      // Clipboard not available
+    }
+  }
+
+  const buildDebugBundle = (run: HistoryRun) => {
+    return JSON.stringify({
+      runId: run.id,
+      prompt: run.commandText,
+      status: run.status,
+      startedAt: run.startedAt,
+      finishedAt: run.finishedAt,
+      retries: run.retries ?? 0,
+      createdIds: run.createdIdsJson,
+      summary: run.summaryJson,
+      events: expandedRunId === run.id ? runEvents : [],
+    }, null, 2)
+  }
+
+  const stepsFromEvents = (events: any[]): import('@/lib/shared-types').ExecutionStep[] => {
+    const steps: import('@/lib/shared-types').ExecutionStep[] = []
+    const stepMap = new Map<string, import('@/lib/shared-types').ExecutionStep>()
+    for (const event of events) {
+      if (!event.stepId) continue
+      const existing = stepMap.get(event.stepId)
+      if (existing) {
+        if (event.status) existing.status = event.status
+        if (event.summary) existing.summary = event.summary
+        if (event.userTitle) existing.userTitle = event.userTitle
+        if (event.userMessage) existing.userMessage = event.userMessage
+        if (event.rationale) existing.rationale = event.rationale
+        if (event.status === 'success' || event.status === 'error') existing.finishedAt = event.ts
+        if (event.debugJson?.step?.fixesApplied) existing.fixesApplied = event.debugJson.step.fixesApplied
+        if (event.debugJson?.step?.attempts) existing.attempts = event.debugJson.step.attempts
+        if (event.createdIdsJson) existing.createdIds = event.createdIdsJson
+      } else {
+        const step: import('@/lib/shared-types').ExecutionStep = {
+          id: event.stepId,
+          order: steps.length,
+          title: event.label || event.stepId,
+          type: 'validation',
+          status: event.status || 'running',
+          summary: event.summary || '',
+          userTitle: event.userTitle,
+          userMessage: event.userMessage,
+          rationale: event.rationale,
+          startedAt: event.ts,
+          finishedAt: event.status === 'success' || event.status === 'error' ? event.ts : undefined,
+          fixesApplied: event.debugJson?.step?.fixesApplied,
+          attempts: event.debugJson?.step?.attempts,
+          createdIds: event.createdIdsJson,
+        }
+        stepMap.set(event.stepId, step)
+        steps.push(step)
+      }
+    }
+    return steps
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <h4 className="text-sm font-medium text-gray-700">Recent Runs</h4>
+        <button
+          type="button"
+          onClick={onRefresh}
+          disabled={loading}
+          className="inline-flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 disabled:opacity-50"
+        >
+          <ArrowPathIcon className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
+          Refresh
+        </button>
+      </div>
+      {runs.length === 0 ? (
+        <div className="text-center py-8 border border-dashed border-gray-300 rounded-lg">
+          <DocumentTextIcon className="w-12 h-12 text-gray-300 mx-auto mb-3" />
+          <p className="text-gray-500">No runs yet</p>
+          <p className="text-sm text-gray-400 mt-1">Execute a command to see history here.</p>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {runs.map((run) => (
+            <div key={run.id} className="rounded-md border border-gray-200 bg-white overflow-hidden">
+              <button
+                type="button"
+                onClick={() => fetchRunEvents(run.id)}
+                className="w-full text-left p-3 hover:bg-gray-50 transition-colors"
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <p className="text-sm text-gray-900 line-clamp-2">{run.commandText}</p>
+                  <StatusBadge status={run.status} />
+                </div>
+                <div className="mt-1 flex items-center gap-3 text-xs text-gray-500">
+                  <span>{safeFormatDate(run.startedAt)}</span>
+                  {(run.retries ?? 0) > 0 && (
+                    <span className="text-amber-600">{run.retries} {run.retries === 1 ? 'retry' : 'retries'}</span>
+                  )}
+                  {run.createdIdsJson && Object.keys(run.createdIdsJson).length > 0 && (
+                    <span className="text-green-600">
+                      {Object.keys(run.createdIdsJson).filter((k) => run.createdIdsJson![k]).length} created
+                    </span>
+                  )}
+                </div>
+              </button>
+
+              <div className="flex items-center gap-1 px-3 pb-2">
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); copyToClipboard(run.commandText, `prompt-${run.id}`) }}
+                  className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-gray-500 hover:bg-gray-100 hover:text-gray-700"
+                >
+                  {copiedId === `prompt-${run.id}` ? (
+                    <><CheckCircleIcon className="h-3 w-3 text-green-500" /> Copied</>
+                  ) : (
+                    'Copy prompt'
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); onRunAgain(run.commandText) }}
+                  className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-gray-500 hover:bg-gray-100 hover:text-gray-700"
+                >
+                  <ArrowPathIcon className="h-3 w-3" /> Run again
+                </button>
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); copyToClipboard(buildDebugBundle(run), `debug-${run.id}`) }}
+                  className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-gray-500 hover:bg-gray-100 hover:text-gray-700"
+                >
+                  {copiedId === `debug-${run.id}` ? (
+                    <><CheckCircleIcon className="h-3 w-3 text-green-500" /> Copied</>
+                  ) : (
+                    'Copy debug'
+                  )}
+                </button>
+              </div>
+
+              {expandedRunId === run.id && (
+                <div className="border-t border-gray-200 p-3 bg-gray-50">
+                  {eventsLoading ? (
+                    <p className="text-xs text-gray-500">Loading timeline...</p>
+                  ) : runEvents.length > 0 ? (
+                    <AIExecutionTimeline
+                      steps={stepsFromEvents(runEvents)}
+                      summary={run.summaryJson as import('@/lib/shared-types').ExecutionSummary | null ?? null}
+                    />
+                  ) : (
+                    <p className="text-xs text-gray-500">No events recorded for this run.</p>
+                  )}
+                </div>
+              )}
+            </div>
+          ))}
         </div>
       )}
     </div>
   )
 }
+
+/* ------------------------------------------------------------------ */
+/* Settings Tab                                                       */
+/* ------------------------------------------------------------------ */
+
+function SettingsTab({
+  selectedAccount,
+  accountContext,
+  requiresDefaultPage,
+  showBillingInstructions,
+  setShowBillingInstructions,
+  onNavigateToDefaultPage,
+  onNavigateToDsaSettings,
+}: {
+  selectedAccount: FacebookAccount | null
+  accountContext?: AICommandCenterProps['accountContext']
+  requiresDefaultPage: boolean
+  showBillingInstructions: boolean
+  setShowBillingInstructions: (v: boolean) => void
+  onNavigateToDefaultPage?: () => void
+  onNavigateToDsaSettings?: (adAccountId: string) => void
+}) {
+  if (!selectedAccount) {
+    return (
+      <div className="text-center py-8 border border-dashed border-gray-300 rounded-lg">
+        <Cog6ToothIcon className="w-12 h-12 text-gray-300 mx-auto mb-3" />
+        <p className="text-gray-500">Select an account to view settings</p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="rounded-md border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700">
+        <p>
+          <span className="font-semibold">Account:</span> {selectedAccount.name}
+        </p>
+        <p>
+          <span className="font-semibold">Default page:</span>{' '}
+          {accountContext?.defaultPageId || 'Not set'}
+        </p>
+        <p>
+          <span className="font-semibold">DSA:</span>{' '}
+          {accountContext?.dsaConfigured ? 'Configured' : 'Missing'}
+        </p>
+      </div>
+
+      <div>
+        <h4 className="text-sm font-medium text-gray-700 mb-2">Health Status</h4>
+        <div className="flex flex-wrap gap-2">
+          <HealthChip label="Billing OK" ok={accountContext?.health?.billingOk ?? false} />
+          <HealthChip label="DSA OK" ok={accountContext?.health?.dsaOk ?? false} />
+          <HealthChip label="Page Connected" ok={accountContext?.health?.pageConnected ?? false} />
+        </div>
+      </div>
+
+      <div>
+        <h4 className="text-sm font-medium text-gray-700 mb-2">Quick Actions</h4>
+        <div className="flex flex-wrap gap-2">
+          {!(accountContext?.health?.dsaOk ?? false) && (
+            <button
+              type="button"
+              className="text-xs px-2 py-1 border rounded border-amber-300 text-amber-800 hover:bg-amber-100"
+              onClick={() => onNavigateToDsaSettings?.(selectedAccount.id)}
+            >
+              Fix DSA
+            </button>
+          )}
+          {(!(accountContext?.health?.pageConnected ?? false) || requiresDefaultPage) && (
+            <button
+              type="button"
+              className="text-xs px-2 py-1 border rounded border-amber-300 text-amber-800 hover:bg-amber-100"
+              onClick={() => onNavigateToDefaultPage?.()}
+            >
+              Set default page
+            </button>
+          )}
+          {!(accountContext?.health?.billingOk ?? false) && (
+            <button
+              type="button"
+              className="text-xs px-2 py-1 border rounded border-amber-300 text-amber-800 hover:bg-amber-100"
+              onClick={() => setShowBillingInstructions(!showBillingInstructions)}
+            >
+              Billing issue
+            </button>
+          )}
+        </div>
+        {showBillingInstructions && !(accountContext?.health?.billingOk ?? false) && (
+          <p className="mt-2 text-xs text-amber-900">
+            Go to Meta Ads Manager &rarr; Billing &amp; payments for this ad account, add/confirm a
+            payment method, then retry.
+          </p>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/* Shared sub-components                                              */
+/* ------------------------------------------------------------------ */
 
 function HealthChip({ label, ok }: { label: string; ok: boolean }) {
   return (
@@ -529,7 +949,37 @@ function HealthChip({ label, ok }: { label: string; ok: boolean }) {
     >
       {label}: {ok ? 'Yes' : 'Needs attention'}
     </span>
-  );
+  )
+}
+
+function StatusBadge({ status }: { status: string }) {
+  const upper = status.toUpperCase()
+  if (upper === 'SUCCESS') {
+    return (
+      <span className="inline-flex items-center rounded border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[10px] text-emerald-700">
+        Success
+      </span>
+    )
+  }
+  if (upper === 'ERROR') {
+    return (
+      <span className="inline-flex items-center rounded border border-rose-200 bg-rose-50 px-1.5 py-0.5 text-[10px] text-rose-700">
+        Error
+      </span>
+    )
+  }
+  if (upper === 'RUNNING') {
+    return (
+      <span className="inline-flex items-center rounded border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[10px] text-blue-700">
+        Running
+      </span>
+    )
+  }
+  return (
+    <span className="inline-flex items-center rounded border border-gray-200 bg-gray-50 px-1.5 py-0.5 text-[10px] text-gray-600">
+      {status}
+    </span>
+  )
 }
 
 function ExecutionProgress({
@@ -537,16 +987,16 @@ function ExecutionProgress({
   steps,
   summary,
 }: {
-  isProcessing: boolean;
-  steps: ExecutionStep[];
-  summary: ExecutionSummary | null;
+  isProcessing: boolean
+  steps: ExecutionStep[]
+  summary: ExecutionSummary | null
 }) {
-  const completed = summary?.stepsCompleted ?? steps.filter((step) => step.status === 'success').length;
-  const total = summary?.totalSteps ?? Math.max(steps.length, 1);
-  const percentage = Math.max(0, Math.min(100, Math.round((completed / total) * 100)));
+  const completed = summary?.stepsCompleted ?? steps.filter((step) => step.status === 'success').length
+  const total = summary?.totalSteps ?? Math.max(steps.length, 1)
+  const percentage = Math.max(0, Math.min(100, Math.round((completed / total) * 100)))
 
   return (
-    <div className="mb-4 rounded-md border border-blue-200 bg-blue-50 p-3">
+    <div className="rounded-md border border-blue-200 bg-blue-50 p-3">
       <div className="mb-1 flex items-center justify-between text-xs text-blue-800">
         <span>{isProcessing ? 'Execution in progress' : 'Execution result'}</span>
         <span>
@@ -560,5 +1010,15 @@ function ExecutionProgress({
         />
       </div>
     </div>
-  );
+  )
+}
+
+function safeFormatDate(dateStr: string): string {
+  try {
+    const d = new Date(dateStr)
+    if (isNaN(d.getTime())) return dateStr
+    return d.toLocaleString()
+  } catch {
+    return dateStr
+  }
 }

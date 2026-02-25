@@ -117,7 +117,7 @@ export class AdsApi {
         limit: params.limit || 50,
         fields:
           'id,name,status,account_id,campaign_id,adset_id,created_time,updated_time,creative{id,title,body,image_url,video_id,link_url,object_story_spec}',
-        effective_status: params.status?.join(','),
+        effective_status: params.status && params.status.length > 0 ? JSON.stringify(params.status) : undefined,
       },
     });
 
