@@ -45,6 +45,7 @@ import { normalizeAdAccountId, normalizePageId, TenantRegistry } from './core/te
 import type { RequestContext } from './core/types.js';
 import { EnvTokenProvider } from './core/token-provider.js';
 import { InsightsApi } from './insights.js';
+import { PixelsApi, type FacebookPixel } from './pixels.js';
 import { TargetingApi } from './targeting.js';
 import { AuditLogService } from '../services/audit-log-service.js';
 import { PolicyViolationError, TenantIsolationError } from './core/types.js';
@@ -78,6 +79,7 @@ export class FacebookServiceFacade {
   private readonly adSetsApi: AdSetsApi;
   private readonly adsApi: AdsApi;
   private readonly insightsApi: InsightsApi;
+  private readonly pixelsApi: PixelsApi;
   private readonly auditLogService: AuditLogService;
   private readonly dsaService: DsaService;
 
@@ -107,6 +109,7 @@ export class FacebookServiceFacade {
     this.adSetsApi = new AdSetsApi(this.graphClient, this.targetingApi, this.dsaService, pageResolver);
     this.adsApi = new AdsApi(this.graphClient, pageResolver, this.dsaService);
     this.insightsApi = new InsightsApi(this.graphClient, this.env.insightsCacheTtlMs);
+    this.pixelsApi = new PixelsApi(this.graphClient);
   }
 
   getTenantRegistry(): TenantRegistry {
@@ -216,6 +219,23 @@ export class FacebookServiceFacade {
     );
     const ctx = this.buildContext(actor, { adAccountId: accountId });
     return this.accountsApi.getPromotablePages(ctx, accountId);
+  }
+
+  async getAdAccountPixels(params: {
+    tenantId?: string;
+    userId?: string;
+    isPlatformAdmin?: boolean;
+    accountId: string;
+  }): Promise<FacebookPixel[]> {
+    const actor = await this.requireActor(params, 'get_ad_account_pixels');
+    await this.tenantRegistry.assertAdAccountAllowed(
+      actor.tenantId,
+      params.accountId,
+      actor.userId,
+      actor.isPlatformAdmin
+    );
+    const ctx = this.buildContext(actor, { adAccountId: params.accountId });
+    return this.pixelsApi.getAdAccountPixels(ctx, params.accountId);
   }
 
   async getCampaigns(params: GetCampaignsParams): Promise<FacebookCampaign[]> {

@@ -51,7 +51,7 @@ export async function GET(
 
     const [businesses, tenant] = await Promise.all([
       db.businessPortfolio.findMany({
-        where: { tenantId },
+        where: { tenantId, deletedAt: null },
         orderBy: { createdAt: 'asc' },
       }),
       db.tenant.findUnique({
@@ -71,6 +71,8 @@ export async function GET(
         businessId: tenant.businessId,
         label: null,
         lastSyncAt: null,
+        deletedAt: null,
+        deletedBy: null,
         createdAt: new Date(0),
         updatedAt: new Date(0),
       });

@@ -8,7 +8,6 @@ describe('parseTargetingConstraints', () => {
     );
     expect(result.language).toBe('romanian');
     expect(result.localeNames).toEqual(['romanian']);
-    expect(result.localeIds).toBeUndefined();
     expect(result.ageMin).toBe(25);
     expect(result.ageMax).toBe(45);
     expect(result.countries).toEqual(['RO']);
@@ -42,7 +41,7 @@ describe('parseTargetingConstraints', () => {
     expect(result.gender).toBe('female');
   });
 
-  it('parses "in romanian" language pattern', () => {
+  it('parses "in romanian" language pattern, returns localeNames for API resolution', () => {
     const result = parseTargetingConstraints(
       'Create a campaign in romanian for users aged 18-35'
     );
@@ -52,20 +51,18 @@ describe('parseTargetingConstraints', () => {
     expect(result.ageMax).toBe(35);
   });
 
-  it('passes language name for MCP resolution instead of hardcoded ID', () => {
+  it('resolves Romanian to localeNames for Meta API resolution', () => {
     const result = parseTargetingConstraints(
       'Target Romanians on romanian language'
     );
     expect(result.language).toBe('romanian');
     expect(result.localeNames).toEqual(['romanian']);
-    expect(result.localeIds).toBeUndefined();
   });
 
   it('returns empty constraints for unrelated command', () => {
     const result = parseTargetingConstraints('Pause all campaigns');
     expect(result.language).toBeUndefined();
     expect(result.localeNames).toBeUndefined();
-    expect(result.localeIds).toBeUndefined();
     expect(result.countries).toBeUndefined();
     expect(result.gender).toBeUndefined();
     expect(result.ageMin).toBeUndefined();
@@ -90,7 +87,7 @@ describe('parseTargetingConstraints', () => {
 });
 
 describe('enforceTargetingConstraints', () => {
-  it('overwrites wrong locales with language name for MCP resolution', () => {
+  it('overwrites wrong locales with language name for API resolution', () => {
     const toolArgs = { targeting: { locales: [28] } };
     const constraints = { language: 'romanian', localeNames: ['romanian'] };
     const fixes = enforceTargetingConstraints(toolArgs, constraints);
@@ -123,7 +120,7 @@ describe('enforceTargetingConstraints', () => {
     expect(fixes.some((f: string) => f.includes('RO'))).toBe(true);
   });
 
-  it('does not produce fixes when locales already match language name', () => {
+  it('does not produce fixes when locales already match language names', () => {
     const toolArgs = {
       targeting: {
         locales: ['romanian'],
@@ -143,5 +140,49 @@ describe('enforceTargetingConstraints', () => {
     };
     const fixes = enforceTargetingConstraints(toolArgs, constraints);
     expect(fixes).toEqual([]);
+  });
+
+  it('Romanian women on romanian language aged 25-45 -> locales=["romanian"], genders=[2], age 25-45', () => {
+    const toolArgs = { targeting: {} };
+    const constraints = parseTargetingConstraints(
+      'Create campaign for Romanian women on romanian language aged 25-45'
+    );
+    const fixes = enforceTargetingConstraints(toolArgs, constraints);
+    expect(toolArgs.targeting.locales).toEqual(['romanian']);
+    expect(toolArgs.targeting.genders).toEqual([2]);
+    expect(toolArgs.targeting.geoLocations.countries).toEqual(['RO']);
+    expect(toolArgs.targeting.ageMin).toBe(25);
+    expect(toolArgs.targeting.ageMax).toBe(45);
+    expect(fixes.length).toBeGreaterThan(0);
+  });
+
+  it('Romanian men -> genders=[1] only', () => {
+    const toolArgs = { targeting: {} };
+    const constraints = parseTargetingConstraints(
+      'Create campaign for Romanian men'
+    );
+    const fixes = enforceTargetingConstraints(toolArgs, constraints);
+    expect(toolArgs.targeting.genders).toEqual([1]);
+  });
+
+  it('no gender in prompt -> no genders restriction in final payload', () => {
+    const toolArgs = { targeting: { genders: [2] } };
+    const constraints = parseTargetingConstraints(
+      'Create campaign for Romanians on romanian language aged 25-45'
+    );
+    expect(constraints.gender).toBeUndefined();
+    const fixes = enforceTargetingConstraints(toolArgs, constraints);
+    expect(toolArgs.targeting.genders).toBeUndefined();
+    expect(fixes.some((f: string) => f.includes('hallucinated'))).toBe(true);
+  });
+
+  it('overwrites AI-hallucinated Indonesian locale with Romanian language name', () => {
+    const toolArgs = { targeting: { locales: [16] } };
+    const constraints = parseTargetingConstraints(
+      'Target Romanians on romanian language aged 25-45'
+    );
+    const fixes = enforceTargetingConstraints(toolArgs, constraints);
+    expect(toolArgs.targeting.locales).toEqual(['romanian']);
+    expect(fixes.some((f: string) => f.includes('romanian'))).toBe(true);
   });
 });

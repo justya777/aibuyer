@@ -285,6 +285,12 @@ export const DuplicateAdSetSchema = z.object({
     .default('PAUSED'),
 });
 
+export const GetAdAccountPixelsSchema = z.object({
+  tenantId: tenantIdRequired,
+  ...actorFields,
+  accountId: z.string(),
+});
+
 export const DuplicateAdSchema = z.object({
   tenantId: tenantIdRequired,
   ...actorFields,
@@ -679,6 +685,18 @@ export const tools: Tool[] = [
     },
   },
   {
+    name: 'get_ad_account_pixels',
+    description: 'Get pixels (data sources) associated with an ad account',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tenantId: { type: 'string', description: 'Tenant ID for authorization and isolation checks' },
+        accountId: { type: 'string', description: 'Ad account ID (act_XXX)' },
+      },
+      required: ['tenantId', 'accountId'],
+    },
+  },
+  {
     name: 'duplicate_campaign',
     description: 'Duplicate a campaign using Facebook native endpoint',
     inputSchema: {
@@ -755,6 +773,7 @@ export const toolSchemas = {
   set_dsa_settings: SetDsaSettingsSchema,
   autofill_dsa_for_ad_account: AutofillDsaForAdAccountSchema,
   get_dsa_autofill_suggestions: GetDsaAutofillSuggestionsSchema,
+  get_ad_account_pixels: GetAdAccountPixelsSchema,
   duplicate_campaign: DuplicateCampaignSchema,
   duplicate_adset: DuplicateAdSetSchema,
   duplicate_ad: DuplicateAdSchema,

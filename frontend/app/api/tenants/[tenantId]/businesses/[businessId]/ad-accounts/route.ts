@@ -71,6 +71,7 @@ export async function GET(
           createdAt: asset.createdAt,
           lastSyncedAt: asset.lastSyncedAt,
           defaultPageId: adAccountSettings?.defaultPageId || null,
+          defaultPixelId: adAccountSettings?.defaultPixelId || null,
           dsaBeneficiary: adAccountSettings?.dsaBeneficiary || null,
           dsaPayor: adAccountSettings?.dsaPayor || null,
           dsaSource: adAccountSettings?.dsaSource || null,

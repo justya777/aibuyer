@@ -3,16 +3,62 @@ type CacheEntry<T = unknown> = {
   storedAt: number;
 };
 
-const DEFAULT_TTL_MS = 30_000;
+export const TTL = {
+  HIERARCHY: 30_000,
+  INSIGHTS: 120_000,
+  DEFAULT: 60_000,
+} as const;
+
+const DEFAULT_TTL_MS = TTL.DEFAULT;
 
 const globalKey = '__apiCacheStore';
-const globalScope = globalThis as unknown as Record<string, Map<string, CacheEntry>>;
+const cooldownKey = '__apiCooldownStore';
+const globalScope = globalThis as unknown as Record<string, unknown>;
 
 function getStore(): Map<string, CacheEntry> {
   if (!globalScope[globalKey]) {
     globalScope[globalKey] = new Map<string, CacheEntry>();
   }
-  return globalScope[globalKey];
+  return globalScope[globalKey] as Map<string, CacheEntry>;
+}
+
+interface CooldownEntry {
+  until: number;
+  consecutiveHits: number;
+}
+
+function getCooldownStore(): Map<string, CooldownEntry> {
+  if (!globalScope[cooldownKey]) {
+    globalScope[cooldownKey] = new Map<string, CooldownEntry>();
+  }
+  return globalScope[cooldownKey] as Map<string, CooldownEntry>;
+}
+
+const BASE_COOLDOWN_MS = 10_000;
+const MAX_COOLDOWN_MS = 300_000;
+
+export function markCooldown(accountKey: string): number {
+  const store = getCooldownStore();
+  const existing = store.get(accountKey);
+  const consecutiveHits = (existing?.consecutiveHits ?? 0) + 1;
+  const cooldownMs = Math.min(BASE_COOLDOWN_MS * 2 ** (consecutiveHits - 1), MAX_COOLDOWN_MS);
+  store.set(accountKey, { until: Date.now() + cooldownMs, consecutiveHits });
+  return cooldownMs;
+}
+
+export function isCoolingDown(accountKey: string): { cooling: boolean; retryAfterMs: number } {
+  const store = getCooldownStore();
+  const entry = store.get(accountKey);
+  if (!entry) return { cooling: false, retryAfterMs: 0 };
+  const remaining = entry.until - Date.now();
+  if (remaining <= 0) {
+    return { cooling: false, retryAfterMs: 0 };
+  }
+  return { cooling: true, retryAfterMs: remaining };
+}
+
+export function clearCooldown(accountKey: string): void {
+  getCooldownStore().delete(accountKey);
 }
 
 function buildKey(parts: string[]): string {
@@ -39,6 +85,18 @@ export function cacheGetStale<T = unknown>(keyParts: string[]): T | null {
   return entry.data as T;
 }
 
+export function cacheGetWithAge<T = unknown>(
+  keyParts: string[],
+  ttlMs = DEFAULT_TTL_MS
+): { data: T; ageMs: number; stale: boolean } | null {
+  const store = getStore();
+  const key = buildKey(keyParts);
+  const entry = store.get(key);
+  if (!entry) return null;
+  const ageMs = Date.now() - entry.storedAt;
+  return { data: entry.data as T, ageMs, stale: ageMs > ttlMs };
+}
+
 export function cacheSet<T = unknown>(keyParts: string[], data: T): void {
   const store = getStore();
   const key = buildKey(keyParts);
@@ -55,6 +113,21 @@ function pruneIfNeeded(store: Map<string, CacheEntry>): void {
       store.delete(key);
     }
   }
+}
+
+export function cacheSetSnapshot<T = unknown>(
+  adAccountId: string,
+  campaignId: string,
+  data: T
+): void {
+  cacheSet(['snapshot', adAccountId, campaignId], data);
+}
+
+export function cacheGetSnapshot<T = unknown>(
+  adAccountId: string,
+  campaignId: string
+): T | null {
+  return cacheGetStale<T>(['snapshot', adAccountId, campaignId]);
 }
 
 export function isRateLimitMessage(error: unknown): boolean {

@@ -200,11 +200,14 @@ export function normalizeExecutionError(error: unknown): NormalizedExecutionErro
     };
   }
 
+  const userTitle = parsed.userTitle || 'Execution error';
+  const userMsg = parsed.userMsg
+    || (code != null ? `Meta error code=${code}${subcode != null ? ` subcode=${subcode}` : ''}` : undefined);
   return {
     category: 'generic',
     blocking: false,
-    userTitle: 'Execution error',
-    userMessage: 'Meta rejected this step. You can review details and retry.',
+    userTitle,
+    userMessage: userMsg || 'Meta rejected this step. You can review details and retry.',
     nextSteps: ['Check the error details and retry the command.'],
     rationale: 'The step failed with an unclassified API error.',
     debug: { raw, code, subcode, fbtraceId, requestId: parsed.requestId },
@@ -218,6 +221,8 @@ function parseErrorPayload(raw: string): {
   subcode?: number | string;
   fbtraceId?: string;
   requestId?: string;
+  userTitle?: string;
+  userMsg?: string;
 } {
   let knownCode:
     | 'DSA_REQUIRED'
@@ -229,6 +234,8 @@ function parseErrorPayload(raw: string): {
   let subcode: number | string | undefined;
   let fbtraceId: string | undefined;
   let requestId: string | undefined;
+  let userTitle: string | undefined;
+  let userMsg: string | undefined;
 
   try {
     const parsed = JSON.parse(raw) as Record<string, unknown>;
@@ -236,6 +243,9 @@ function parseErrorPayload(raw: string): {
       if (parsed.code === 'DSA_REQUIRED') knownCode = 'DSA_REQUIRED';
       if (parsed.code === 'DEFAULT_PAGE_REQUIRED') knownCode = 'DEFAULT_PAGE_REQUIRED';
       if (parsed.code === 'PAYMENT_METHOD_REQUIRED') knownCode = 'PAYMENT_METHOD_REQUIRED';
+      code = parsed.code;
+    }
+    if (typeof parsed.code === 'number') {
       code = parsed.code;
     }
     if (Array.isArray(parsed.nextSteps)) {
@@ -250,6 +260,20 @@ function parseErrorPayload(raw: string): {
     if (typeof parsed.request_id === 'string') {
       requestId = parsed.request_id;
     }
+    if (typeof parsed.error_user_title === 'string') {
+      userTitle = parsed.error_user_title;
+    }
+    if (typeof parsed.error_user_msg === 'string') {
+      userMsg = parsed.error_user_msg;
+    }
+    const nested = parsed.error as Record<string, unknown> | undefined;
+    if (nested && typeof nested === 'object') {
+      if (!code && (typeof nested.code === 'number' || typeof nested.code === 'string')) code = nested.code as number | string;
+      if (!subcode && (typeof nested.error_subcode === 'number' || typeof nested.error_subcode === 'string')) subcode = nested.error_subcode as number | string;
+      if (!fbtraceId && typeof nested.fbtrace_id === 'string') fbtraceId = nested.fbtrace_id;
+      if (!userTitle && typeof nested.error_user_title === 'string') userTitle = nested.error_user_title;
+      if (!userMsg && typeof nested.error_user_msg === 'string') userMsg = nested.error_user_msg;
+    }
   } catch {
     // Ignore JSON parse failure and fallback to regex parsing.
   }
@@ -263,7 +287,7 @@ function parseErrorPayload(raw: string): {
   const requestMatch = raw.match(/request[_\s-]*id[=:]\s*([a-z0-9_-]+)/i);
   if (!requestId && requestMatch?.[1]) requestId = requestMatch[1];
 
-  return { knownCode, nextSteps, code, subcode, fbtraceId, requestId };
+  return { knownCode, nextSteps, code, subcode, fbtraceId, requestId, userTitle, userMsg };
 }
 
 function stringifyError(error: unknown): string {

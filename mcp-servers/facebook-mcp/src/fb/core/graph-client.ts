@@ -36,6 +36,25 @@ export class GraphApiError extends Error {
   }
 }
 
+export class RateLimitCooldownError extends GraphApiError {
+  readonly retryAfterSeconds: number;
+  readonly cooldownUntil: Date;
+
+  constructor(accountId: string, cooldownUntil: Date) {
+    const retryAfterSeconds = Math.max(0, Math.ceil((cooldownUntil.getTime() - Date.now()) / 1000));
+    super(
+      `Rate limit cooldown active for account ${accountId}. Retry after ${retryAfterSeconds}s. code=17 subcode=2446079`,
+      { isRetryable: true, attempt: 0 }
+    );
+    this.name = 'RateLimitCooldownError';
+    this.retryAfterSeconds = retryAfterSeconds;
+    this.cooldownUntil = cooldownUntil;
+  }
+}
+
+const DEFAULT_COOLDOWN_MS = 60_000;
+const accountCooldowns = new Map<string, number>();
+
 interface GraphClientOptions {
   apiVersion: string;
   retry: GraphRetryConfig;
@@ -146,6 +165,13 @@ export class GraphClient {
 
   async request<T = unknown>(ctx: RequestContext, request: GraphRequest): Promise<GraphResponse<T>> {
     await this.enforceTenantIsolation(ctx, request);
+
+    const accountKey = ctx.adAccountId || 'global';
+    const cooldownUntil = accountCooldowns.get(accountKey);
+    if (cooldownUntil && Date.now() < cooldownUntil) {
+      throw new RateLimitCooldownError(accountKey, new Date(cooldownUntil));
+    }
+
     const url = `${this.baseUrl}/${this.apiVersion}/${normalizePath(request.path)}`;
     const maxAttempts = this.retry.maxRetries + 1;
 
@@ -187,7 +213,18 @@ export class GraphClient {
           };
         }
 
-        const retryable = isRetryableStatus(response.status) || isRateLimitErrorBody(response.data);
+        const isRateLimit = isRateLimitErrorBody(response.data);
+        const retryable = isRetryableStatus(response.status) || isRateLimit;
+
+        if (isRateLimit) {
+          const retryAfterHeader = (rawHeaders['retry-after'] as string) || '';
+          const retryAfterMs = retryAfterHeader
+            ? parseInt(retryAfterHeader, 10) * 1000
+            : DEFAULT_COOLDOWN_MS;
+          accountCooldowns.set(accountKey, Date.now() + retryAfterMs);
+          logger.warn(`[COOLDOWN] account=${accountKey} cooldownMs=${retryAfterMs} path=${request.path}`);
+        }
+
         if (retryable && attempt < maxAttempts) {
           await this.backoff(attempt, ctx);
           continue;

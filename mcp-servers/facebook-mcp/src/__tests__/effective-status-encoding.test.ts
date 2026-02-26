@@ -1,4 +1,5 @@
 import { GraphClient } from '../fb/core/graph-client.js';
+import { graphQuery } from '../fb/core/query-builder.js';
 import type { TokenProvider } from '../fb/core/token-provider.js';
 import { AdSetsApi } from '../fb/adsets.js';
 import { AdsApi } from '../fb/ads.js';
@@ -187,6 +188,58 @@ describe('rate limit detection in GraphClient', () => {
     ).rejects.toThrow();
 
     expect(httpClient.request).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('RateLimitCooldownError', () => {
+  it('is thrown when account is in cooldown', async () => {
+    const { RateLimitCooldownError } = await import('../fb/core/graph-client.js');
+    const future = new Date(Date.now() + 30_000);
+    const err = new RateLimitCooldownError('act_123', future);
+    expect(err.name).toBe('RateLimitCooldownError');
+    expect(err.retryAfterSeconds).toBeGreaterThan(0);
+    expect(err.retryAfterSeconds).toBeLessThanOrEqual(30);
+    expect(err.message).toContain('act_123');
+    expect(err.message).toContain('code=17');
+  });
+});
+
+describe('QueryBuilder', () => {
+  it('builds effective_status as JSON-stringified array', () => {
+    const q = graphQuery().withEffectiveStatus(['ACTIVE', 'PAUSED']).build();
+    expect(q.effective_status).toBe(JSON.stringify(['ACTIVE', 'PAUSED']));
+  });
+
+  it('omits effective_status for undefined input', () => {
+    const q = graphQuery().withEffectiveStatus(undefined).build();
+    expect(q.effective_status).toBeUndefined();
+  });
+
+  it('omits effective_status for empty array', () => {
+    const q = graphQuery().withEffectiveStatus([]).build();
+    expect(q.effective_status).toBeUndefined();
+  });
+
+  it('joins fields with comma', () => {
+    const q = graphQuery().withFields(['id', 'name', 'status']).build();
+    expect(q.fields).toBe('id,name,status');
+  });
+
+  it('clamps limit to 1-200', () => {
+    expect(graphQuery().withLimit(0).build().limit).toBe('1');
+    expect(graphQuery().withLimit(300).build().limit).toBe('200');
+    expect(graphQuery().withLimit(50).build().limit).toBe('50');
+  });
+
+  it('chains methods fluently', () => {
+    const q = graphQuery()
+      .withLimit(25)
+      .withFields(['id', 'name'])
+      .withEffectiveStatus(['ACTIVE'])
+      .build();
+    expect(q.limit).toBe('25');
+    expect(q.fields).toBe('id,name');
+    expect(q.effective_status).toBe(JSON.stringify(['ACTIVE']));
   });
 });
 

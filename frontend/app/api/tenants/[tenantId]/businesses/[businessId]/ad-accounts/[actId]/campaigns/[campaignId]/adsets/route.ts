@@ -6,7 +6,7 @@ import {
   TenantAccessError,
   resolveTenantContext,
 } from '@/lib/tenant-context';
-import { cacheGet, cacheGetStale, cacheSet, isRateLimitMessage } from '@/lib/api-cache';
+import { cacheGet, cacheGetStale, cacheSet, isRateLimitMessage, isCoolingDown, markCooldown, clearCooldown, TTL } from '@/lib/api-cache';
 import type { AdAccountHierarchyAdSet, EntityPerformance, TargetingSnapshot } from '@/lib/shared-types';
 
 export const dynamic = 'force-dynamic';
@@ -71,11 +71,13 @@ async function getInsightsSafe(
 }
 
 function mapTargeting(raw: any): TargetingSnapshot {
+  const gender: 'male' | 'female' | 'all' | undefined =
+    raw?.gender === 'male' || raw?.gender === 'female' || raw?.gender === 'all' ? raw.gender : undefined;
   return {
     countries: Array.isArray(raw?.countries) ? raw.countries.map((entry: unknown) => String(entry)) : [],
     ageMin: typeof raw?.ageMin === 'number' ? raw.ageMin : undefined,
     ageMax: typeof raw?.ageMax === 'number' ? raw.ageMax : undefined,
-    gender: raw?.gender === 'male' || raw?.gender === 'female' || raw?.gender === 'all' ? raw.gender : 'all',
+    ...(gender ? { gender } : {}),
     interests: Array.isArray(raw?.interests) ? raw.interests.map((entry: unknown) => String(entry)) : [],
     behaviors: Array.isArray(raw?.behaviors) ? raw.behaviors.map((entry: unknown) => String(entry)) : [],
   };
@@ -95,13 +97,23 @@ function buildTargetingSummary(targeting: TargetingSnapshot): string {
   if (targeting.countries.length > 0) {
     parts.push(targeting.countries.slice(0, 2).join(', '));
   }
-  if (typeof targeting.ageMin === 'number' || typeof targeting.ageMax === 'number') {
-    const genderLabel =
-      targeting.gender === 'male' ? 'Men' : targeting.gender === 'female' ? 'Women' : 'All genders';
-    parts.push(`${genderLabel} ${targeting.ageMin ?? '?'}-${targeting.ageMax ?? '?'}`);
-  } else if (targeting.gender && targeting.gender !== 'all') {
+
+  const isDefaultAge =
+    (targeting.ageMin === 18 || targeting.ageMin === undefined) &&
+    (targeting.ageMax === 65 || targeting.ageMax === undefined);
+  const hasExplicitAge = (typeof targeting.ageMin === 'number' || typeof targeting.ageMax === 'number') && !isDefaultAge;
+  const hasExplicitGender = targeting.gender === 'male' || targeting.gender === 'female';
+
+  if (hasExplicitAge) {
+    const genderLabel = hasExplicitGender
+      ? (targeting.gender === 'male' ? 'Men' : 'Women')
+      : '';
+    const ageStr = `${targeting.ageMin ?? '?'}-${targeting.ageMax ?? '?'}`;
+    parts.push(genderLabel ? `${genderLabel} ${ageStr}` : ageStr);
+  } else if (hasExplicitGender) {
     parts.push(targeting.gender === 'male' ? 'Men' : 'Women');
   }
+
   return parts.join(' \u2022 ');
 }
 
@@ -151,6 +163,18 @@ export async function GET(
       return NextResponse.json({ success: true, tenantId, businessId, adAccountId, campaignId, adSets: cached });
     }
 
+    const cooldown = isCoolingDown(adAccountId);
+    if (cooldown.cooling) {
+      const stale = cacheGetStale<AdAccountHierarchyAdSet[]>(cacheKey);
+      if (stale) {
+        return NextResponse.json({ success: true, tenantId, businessId, adAccountId, campaignId, adSets: stale, rateLimited: true, retryAfterMs: cooldown.retryAfterMs });
+      }
+      return NextResponse.json(
+        { success: false, error: 'Rate limit cooldown active.', rateLimited: true, retryAfterMs: cooldown.retryAfterMs },
+        { status: 429 }
+      );
+    }
+
     const mcpClient = new MCPClient({
       tenantId,
       userId: context.userId,
@@ -163,11 +187,13 @@ export async function GET(
         limit: 50,
         status: ['ACTIVE', 'PAUSED', 'ADSET_PAUSED', 'IN_PROCESS', 'WITH_ISSUES', 'PENDING_REVIEW', 'DISAPPROVED', 'PREAPPROVED'],
       });
+      clearCooldown(adAccountId);
     } catch (fetchError) {
       if (isRateLimitMessage(fetchError)) {
+        const retryAfterMs = markCooldown(adAccountId);
         const stale = cacheGetStale<AdAccountHierarchyAdSet[]>(cacheKey);
         if (stale) {
-          return NextResponse.json({ success: true, tenantId, businessId, adAccountId, campaignId, adSets: stale, rateLimited: true, retryAfterMs: 10000 });
+          return NextResponse.json({ success: true, tenantId, businessId, adAccountId, campaignId, adSets: stale, rateLimited: true, retryAfterMs });
         }
       }
       throw fetchError;

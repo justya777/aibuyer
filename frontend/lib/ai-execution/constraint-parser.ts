@@ -6,7 +6,6 @@
 
 export interface TargetingConstraints {
   language?: string;
-  localeIds?: number[];
   localeNames?: string[];
   ageMin?: number;
   ageMax?: number;
@@ -87,8 +86,6 @@ const INTEREST_PATTERN = /\binterested\s+in\s+([^,]+?)(?:\s+with\b|\s+aged?\b|\s
 export function parseTargetingConstraints(command: string): TargetingConstraints {
   const constraints: TargetingConstraints = {};
 
-  // 1. Language detection - must come before country to avoid false positives
-  // Locale IDs are NOT hardcoded; the MCP server resolves names via Graph API search.
   for (const [langName, { pattern }] of Object.entries(LANGUAGE_PATTERNS)) {
     if (pattern.test(command)) {
       constraints.language = langName;
@@ -162,7 +159,6 @@ export function enforceTargetingConstraints(
   if (!toolArgs.targeting) toolArgs.targeting = {};
   const targeting = toolArgs.targeting;
 
-  // Enforce locale/language -- pass language names so the MCP server resolves via Graph API
   if (constraints.localeNames && constraints.localeNames.length > 0) {
     const currentLocales = targeting.locales;
     const alreadyHasLanguage =

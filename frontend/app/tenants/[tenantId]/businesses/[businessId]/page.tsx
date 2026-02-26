@@ -9,12 +9,19 @@ type AdAccountRow = {
   name: string;
   status: string | null;
   defaultPageId: string | null;
+  defaultPixelId: string | null;
   dsaBeneficiary: string | null;
   dsaPayor: string | null;
   dsaSource: string | null;
   dsaUpdatedAt: string | null;
   dsaConfigured?: boolean;
   dsaStatus?: 'CONFIGURED' | 'MISSING';
+};
+
+type PixelRow = {
+  pixelId: string;
+  name: string | null;
+  permissionOk: boolean;
 };
 
 type PageRow = {
@@ -107,6 +114,13 @@ export default function BusinessPortfolioDetailPage() {
   const [isLoadingDsa, setIsLoadingDsa] = useState(false);
   const [handledOpenDsaAccountId, setHandledOpenDsaAccountId] = useState<string | null>(null);
   const [debugAiLogs, setDebugAiLogs] = useState<DebugAiLogEntry[]>([]);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [deleteConfirmText, setDeleteConfirmText] = useState('');
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [pixelsByAccount, setPixelsByAccount] = useState<Record<string, PixelRow[]>>({});
+  const [pixelLoadingFor, setPixelLoadingFor] = useState<string | null>(null);
+  const [pixelUpdatingFor, setPixelUpdatingFor] = useState<string | null>(null);
   const openDsaFor = searchParams.get('openDsaFor');
 
   const loadData = useCallback(async () => {
@@ -200,6 +214,51 @@ export default function BusinessPortfolioDetailPage() {
       setError(saveError instanceof Error ? saveError.message : 'Failed to set default page.');
     } finally {
       setDefaultPageUpdatingFor(null);
+    }
+  }
+
+  async function loadPixelsForAccount(adAccountId: string): Promise<void> {
+    if (!tenantId || !businessId) return;
+    if (pixelsByAccount[adAccountId]) return;
+    setPixelLoadingFor(adAccountId);
+    try {
+      const resp = await fetch(
+        `/api/tenants/${tenantId}/businesses/${encodeURIComponent(businessId)}/ad-accounts/${encodeURIComponent(adAccountId)}/pixels`,
+        { headers: { 'x-tenant-id': tenantId } }
+      );
+      if (resp.ok) {
+        const data = await resp.json();
+        setPixelsByAccount((prev) => ({ ...prev, [adAccountId]: data.pixels || [] }));
+      }
+    } catch {
+      // ignore
+    } finally {
+      setPixelLoadingFor(null);
+    }
+  }
+
+  async function handleSetDefaultPixel(adAccountId: string, pixelId: string | null): Promise<void> {
+    if (!tenantId || !businessId) return;
+    setPixelUpdatingFor(adAccountId);
+    setError(null);
+    try {
+      const resp = await fetch(
+        `/api/tenants/${tenantId}/businesses/${encodeURIComponent(businessId)}/ad-accounts/${encodeURIComponent(adAccountId)}/default-pixel`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-tenant-id': tenantId },
+          body: JSON.stringify({ pixelId: pixelId || null }),
+        }
+      );
+      if (!resp.ok) {
+        const payload = await resp.json();
+        throw new Error(payload.error || 'Failed to set default pixel.');
+      }
+      await loadData();
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : 'Failed to set default pixel.');
+    } finally {
+      setPixelUpdatingFor(null);
     }
   }
 
@@ -434,6 +493,7 @@ export default function BusinessPortfolioDetailPage() {
                 <tr className="text-left border-b border-gray-200">
                   <th className="py-2 pr-4">Ad Account</th>
                   <th className="py-2 pr-4">Default Page</th>
+                  <th className="py-2 pr-4">Default Pixel</th>
                   <th className="py-2 pr-4">DSA</th>
                   <th className="py-2 pr-4">Actions</th>
                 </tr>
@@ -461,6 +521,37 @@ export default function BusinessPortfolioDetailPage() {
                           </option>
                         ))}
                       </select>
+                    </td>
+                    <td className="py-2 pr-4 min-w-[240px]">
+                      {pixelsByAccount[account.adAccountId] ? (
+                        <select
+                          className="w-full border border-gray-300 rounded px-2 py-1 text-sm disabled:bg-gray-100"
+                          value={account.defaultPixelId || ''}
+                          disabled={pixelUpdatingFor === account.adAccountId}
+                          onChange={(e) => void handleSetDefaultPixel(account.adAccountId, e.target.value || null)}
+                        >
+                          <option value="">No pixel selected</option>
+                          {pixelsByAccount[account.adAccountId].map((pixel) => (
+                            <option key={pixel.pixelId} value={pixel.pixelId}>
+                              {pixel.name || pixel.pixelId}{!pixel.permissionOk ? ' (no access)' : ''}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <div className="flex items-center gap-2">
+                          <span className={`text-sm ${account.defaultPixelId ? 'text-gray-700' : 'text-amber-600'}`}>
+                            {account.defaultPixelId ? `ID: ${account.defaultPixelId}` : 'None'}
+                          </span>
+                          <button
+                            type="button"
+                            className="px-2 py-0.5 border border-gray-300 rounded text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+                            disabled={pixelLoadingFor === account.adAccountId}
+                            onClick={() => void loadPixelsForAccount(account.adAccountId)}
+                          >
+                            {pixelLoadingFor === account.adAccountId ? 'Loading...' : 'Select'}
+                          </button>
+                        </div>
+                      )}
                     </td>
                     <td className="py-2 pr-4">
                       {account.dsaBeneficiary && account.dsaPayor ? (
@@ -578,7 +669,82 @@ export default function BusinessPortfolioDetailPage() {
               <li>Fallback pages are confirmed when selected as a default.</li>
             </ul>
           </div>
+
+          <div className="mt-6 border-t border-gray-200 pt-4">
+            <h4 className="text-sm font-semibold text-red-700">Danger Zone</h4>
+            <p className="text-xs text-gray-600 mt-1">
+              Deleting this business portfolio will detach all associated ad accounts, pages, and pixels from this BP.
+              No assets will be deleted from Meta.
+            </p>
+            <button
+              type="button"
+              onClick={() => { setShowDeleteModal(true); setDeleteConfirmText(''); setDeleteError(null); }}
+              className="mt-2 px-3 py-1.5 bg-red-600 text-white text-sm rounded-md hover:bg-red-700 transition-colors"
+            >
+              Delete Business Portfolio
+            </button>
+          </div>
         </section>
+      ) : null}
+
+      {showDeleteModal ? (
+        <div className="fixed inset-0 bg-black/30 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-lg border border-gray-200 p-5 w-full max-w-md space-y-4">
+            <h3 className="text-lg font-semibold text-red-700">Delete Business Portfolio</h3>
+            <p className="text-sm text-gray-700">
+              This action will soft-delete the business portfolio and detach all ad accounts, pages, and pixels.
+              No assets will be removed from Meta.
+            </p>
+            <p className="text-sm text-gray-700">
+              Type <strong>{businessId}</strong> to confirm:
+            </p>
+            <input
+              type="text"
+              className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm"
+              value={deleteConfirmText}
+              onChange={(e) => setDeleteConfirmText(e.target.value)}
+              placeholder={businessId}
+            />
+            {deleteError ? <p className="text-sm text-red-600">{deleteError}</p> : null}
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowDeleteModal(false)}
+                className="px-3 py-1.5 border border-gray-300 rounded-md text-sm hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={deleteConfirmText !== businessId || isDeleting}
+                onClick={async () => {
+                  setIsDeleting(true);
+                  setDeleteError(null);
+                  try {
+                    const resp = await fetch(
+                      `/api/tenants/${tenantId}/businesses/${encodeURIComponent(businessId)}`,
+                      {
+                        method: 'DELETE',
+                        headers: { 'x-tenant-id': tenantId },
+                      }
+                    );
+                    const data = await resp.json();
+                    if (!resp.ok || !data.success) {
+                      throw new Error(data.error || 'Failed to delete.');
+                    }
+                    window.location.href = `/tenants/${tenantId}/businesses`;
+                  } catch (err) {
+                    setDeleteError(err instanceof Error ? err.message : 'Unknown error');
+                    setIsDeleting(false);
+                  }
+                }}
+                className="px-3 py-1.5 bg-red-600 text-white text-sm rounded-md hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isDeleting ? 'Deleting...' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
       ) : null}
 
       {editingDsaAccount ? (

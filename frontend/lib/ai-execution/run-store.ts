@@ -21,6 +21,13 @@ export interface AppendAiRunEventInput {
   rationale?: string;
   debugJson?: Record<string, unknown> | null;
   createdIdsJson?: Record<string, unknown> | null;
+  requestPayload?: Record<string, unknown> | null;
+  sanitizedPayload?: Record<string, unknown> | null;
+  attempt?: number;
+  durationMs?: number;
+  errorCode?: string;
+  errorSubcode?: string;
+  fbtraceId?: string;
   ts?: string | Date;
 }
 
@@ -47,15 +54,26 @@ export async function markAiRunRunning(runId: string) {
 export async function markAiRunFinished(input: {
   runId: string;
   success: boolean;
+  finalStatus?: 'success' | 'partial' | 'error';
   finishedAt?: string | Date;
   createdIdsJson?: Record<string, unknown> | null;
   summaryJson?: Record<string, unknown> | null;
+  snapshotJson?: Record<string, unknown> | null;
   retries?: number;
 }) {
+  let status: AiRunStatus;
+  if (input.finalStatus === 'partial') {
+    status = AiRunStatus.PARTIAL;
+  } else if (input.finalStatus === 'success' || input.success) {
+    status = AiRunStatus.SUCCESS;
+  } else {
+    status = AiRunStatus.ERROR;
+  }
+
   return db.aiRun.update({
     where: { id: input.runId },
     data: {
-      status: input.success ? AiRunStatus.SUCCESS : AiRunStatus.ERROR,
+      status,
       finishedAt: toDate(input.finishedAt) || new Date(),
       createdIdsJson: input.createdIdsJson
         ? (input.createdIdsJson as Prisma.InputJsonValue)
@@ -63,9 +81,28 @@ export async function markAiRunFinished(input: {
       summaryJson: input.summaryJson
         ? (input.summaryJson as Prisma.InputJsonValue)
         : undefined,
+      snapshotJson: input.snapshotJson
+        ? (input.snapshotJson as Prisma.InputJsonValue)
+        : undefined,
       retries: typeof input.retries === 'number' ? input.retries : undefined,
     },
   });
+}
+
+export async function getLatestRunSnapshot(adAccountId: string, campaignId: string) {
+  const run = await db.aiRun.findFirst({
+    where: {
+      adAccountId,
+      status: AiRunStatus.SUCCESS,
+      snapshotJson: { not: Prisma.DbNull },
+    },
+    orderBy: { finishedAt: 'desc' },
+    select: { snapshotJson: true, finishedAt: true },
+  });
+  if (!run?.snapshotJson) return null;
+  const snapshot = run.snapshotJson as Record<string, unknown>;
+  if (snapshot.campaignId !== campaignId) return null;
+  return { snapshot, finishedAt: run.finishedAt };
 }
 
 export async function appendAiRunEvent(input: AppendAiRunEventInput) {
@@ -86,6 +123,17 @@ export async function appendAiRunEvent(input: AppendAiRunEventInput) {
       createdIdsJson: input.createdIdsJson
         ? (input.createdIdsJson as Prisma.InputJsonValue)
         : undefined,
+      requestPayload: input.requestPayload
+        ? (input.requestPayload as Prisma.InputJsonValue)
+        : undefined,
+      sanitizedPayload: input.sanitizedPayload
+        ? (input.sanitizedPayload as Prisma.InputJsonValue)
+        : undefined,
+      attempt: input.attempt,
+      durationMs: input.durationMs,
+      errorCode: input.errorCode,
+      errorSubcode: input.errorSubcode,
+      fbtraceId: input.fbtraceId,
       ts: toDate(input.ts) || new Date(),
     },
   });
@@ -121,6 +169,30 @@ export async function listAiRunEvents(runId: string, limit = 400) {
     where: { runId },
     orderBy: { ts: 'asc' },
     take: bounded,
+  });
+}
+
+export async function persistEntitySnapshots(
+  runId: string,
+  snapshots: Array<{ entityType: string; entityId: string; sanitizedPayload: Record<string, unknown> }>
+) {
+  if (snapshots.length === 0) return;
+  await db.aiRunSnapshot.createMany({
+    data: snapshots.map((s) => ({
+      runId,
+      entityType: s.entityType,
+      entityId: s.entityId,
+      sanitizedPayload: s.sanitizedPayload as Prisma.InputJsonValue,
+    })),
+    skipDuplicates: true,
+  });
+}
+
+export async function getEntitySnapshot(entityType: string, entityId: string) {
+  return db.aiRunSnapshot.findFirst({
+    where: { entityType, entityId },
+    orderBy: { createdAt: 'desc' },
+    select: { sanitizedPayload: true, createdAt: true, runId: true },
   });
 }
 

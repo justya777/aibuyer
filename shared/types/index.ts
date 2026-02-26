@@ -195,6 +195,7 @@ export interface AdAccountHealthIndicators {
   billingOk: boolean;
   dsaOk: boolean;
   pageConnected: boolean;
+  pixelConnected: boolean;
 }
 
 export interface AdAccountHierarchyPayload {
@@ -203,6 +204,7 @@ export interface AdAccountHierarchyPayload {
     name: string;
     status: string | null;
     defaultPageId: string | null;
+    defaultPixelId: string | null;
     dsaBeneficiary: string | null;
     dsaPayor: string | null;
     dsaConfigured: boolean;
@@ -245,6 +247,7 @@ export interface CreatedEntityIds {
   adId?: string;
   adSetIds?: string[];
   adIds?: string[];
+  pixelId?: string;
 }
 
 export interface ExecutionStep {
@@ -278,24 +281,24 @@ export interface ExecutionSummary {
 }
 
 export interface ExecutionBlockingError {
-  code: 'DSA_REQUIRED' | 'DEFAULT_PAGE_REQUIRED' | 'PAYMENT_METHOD_REQUIRED';
+  code: 'DSA_REQUIRED' | 'DEFAULT_PAGE_REQUIRED' | 'PAYMENT_METHOD_REQUIRED' | 'PIXEL_REQUIRED';
   category?: string;
   blocking?: boolean;
   userTitle?: string;
   userMessage?: string;
   message: string;
-  nextSteps: string[];
+  nextSteps?: string[];
   debug?: Record<string, unknown>;
   action?:
     | {
         type: 'OPEN_DSA_SETTINGS';
-        tenantId: string;
-        adAccountId: string;
+        tenantId?: string;
+        adAccountId?: string;
       }
     | {
         type: 'OPEN_DEFAULT_PAGE_SETTINGS';
-        tenantId: string;
-        adAccountId: string;
+        tenantId?: string;
+        adAccountId?: string;
       };
 }
 

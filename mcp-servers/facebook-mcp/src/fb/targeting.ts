@@ -78,6 +78,15 @@ export function parseGenderFromInput(genders?: number[]): 'all' | 'male' | 'fema
   return 'all';
 }
 
+interface LocaleCacheEntry {
+  id: number;
+  name?: string;
+  cachedAt: number;
+}
+
+const LOCALE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const localeCache = new Map<string, LocaleCacheEntry>();
+
 export class TargetingApi {
   private readonly graphClient: GraphClient;
 
@@ -242,19 +251,28 @@ export class TargetingApi {
 
   private async resolveLocales(ctx: RequestContext, locales: Array<number | string>): Promise<number[]> {
     const localeIds: number[] = [];
-    const resolved: Array<{ input: string | number; id: number; name?: string }> = [];
+    const resolved: Array<{ input: string | number; id: number; name?: string; cached: boolean }> = [];
+    const now = Date.now();
 
     for (const locale of locales) {
       if (typeof locale === 'number') {
         localeIds.push(locale);
-        resolved.push({ input: locale, id: locale });
+        resolved.push({ input: locale, id: locale, cached: false });
         continue;
       }
 
       const asNumber = Number.parseInt(locale, 10);
       if (Number.isFinite(asNumber) && asNumber.toString() === locale) {
         localeIds.push(asNumber);
-        resolved.push({ input: locale, id: asNumber });
+        resolved.push({ input: locale, id: asNumber, cached: false });
+        continue;
+      }
+
+      const cacheKey = locale.toLowerCase().trim();
+      const cached = localeCache.get(cacheKey);
+      if (cached && now - cached.cachedAt < LOCALE_CACHE_TTL_MS) {
+        localeIds.push(cached.id);
+        resolved.push({ input: locale, id: cached.id, name: cached.name, cached: true });
         continue;
       }
 
@@ -274,7 +292,8 @@ export class TargetingApi {
           const parsed = Number.parseInt(first.key, 10);
           if (Number.isFinite(parsed)) {
             localeIds.push(parsed);
-            resolved.push({ input: locale, id: parsed, name: first.name });
+            localeCache.set(cacheKey, { id: parsed, name: first.name, cachedAt: now });
+            resolved.push({ input: locale, id: parsed, name: first.name, cached: false });
           }
         } else {
           logger.warn(`No locale results from Meta for "${locale}"`, {

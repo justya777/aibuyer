@@ -9,6 +9,7 @@ import type {
 } from '@/lib/shared-types'
 import { buildStepFromSsePayload, parseTimelineDonePayload } from '@/lib/ai-execution/sse-events'
 import AIExecutionTimeline from './AIExecutionTimeline'
+import MaterialsTab from './ad-account/MaterialsTab'
 import {
   ArrowPathIcon,
   ClockIcon,
@@ -24,15 +25,21 @@ import {
   XMarkIcon,
 } from '@heroicons/react/24/outline'
 
-const TAB_STORAGE_KEY = 'ai-panel-tab'
+function tabStorageKey(tenantId?: string | null, actId?: string | null): string {
+  if (tenantId && actId) return `ai-panel-tab:${tenantId}:${actId}`
+  return 'ai-panel-tab'
+}
+
 type TabId = 'command' | 'timeline' | 'materials' | 'history' | 'settings'
 
-const TABS: { id: TabId; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
-  { id: 'command', label: 'Command', icon: CommandLineIcon },
-  { id: 'timeline', label: 'Timeline', icon: ClockIcon },
-  { id: 'materials', label: 'Materials', icon: PhotoIcon },
-  { id: 'history', label: 'History', icon: DocumentTextIcon },
-  { id: 'settings', label: 'Settings', icon: Cog6ToothIcon },
+
+// I'VE DELETED THE LABELS BECAUSE THEY ARE NOT NEEDED, CAUSING UI TO GO OFFSCREEN
+const TABS: { id: TabId; icon: React.ComponentType<{ className?: string }> }[] = [
+  { id: 'command', icon: CommandLineIcon },
+  { id: 'timeline', icon: ClockIcon },
+  { id: 'materials', icon: PhotoIcon },
+  { id: 'history', icon: DocumentTextIcon },
+  { id: 'settings', icon: Cog6ToothIcon },
 ]
 
 interface AICommandCenterProps {
@@ -42,11 +49,13 @@ interface AICommandCenterProps {
   requiresDefaultPage?: boolean
   accountContext?: {
     defaultPageId: string | null
+    defaultPixelId?: string | null
     dsaConfigured: boolean
     health?: {
       billingOk: boolean
       dsaOk: boolean
       pageConnected: boolean
+      pixelConnected?: boolean
     }
   }
   executionSteps?: ExecutionStep[]
@@ -93,9 +102,10 @@ export default function AICommandCenter({
   onCampaignCreated,
 }: AICommandCenterProps) {
   const COMMAND_TIMEOUT_MS = 120000
+  const storageKey = tabStorageKey(selectedTenantId, selectedAccount?.id)
   const [activeTab, setActiveTab] = useState<TabId>(() => {
     if (typeof window !== 'undefined') {
-      const stored = localStorage.getItem(TAB_STORAGE_KEY)
+      const stored = localStorage.getItem(storageKey)
       if (stored && TABS.some((t) => t.id === stored)) return stored as TabId
     }
     return 'command'
@@ -117,9 +127,9 @@ export default function AICommandCenter({
   const switchTab = useCallback((tab: TabId) => {
     setActiveTab(tab)
     if (typeof window !== 'undefined') {
-      localStorage.setItem(TAB_STORAGE_KEY, tab)
+      localStorage.setItem(storageKey, tab)
     }
-  }, [])
+  }, [storageKey])
 
   useEffect(() => {
     if (isProcessing && activeTab !== 'timeline') {
@@ -165,7 +175,7 @@ export default function AICommandCenter({
     await executeCommand(command.trim())
   }
 
-  const executeCommand = async (nextCommand: string) => {
+  const executeCommand = async (nextCommand: string, resumeFromRunId?: string) => {
     if (!nextCommand || !selectedAccount || !selectedBusinessId) return
 
     onExecutionReset()
@@ -185,6 +195,7 @@ export default function AICommandCenter({
           command: nextCommand,
           accountId: selectedAccount.id,
           businessId: selectedBusinessId,
+          ...(resumeFromRunId ? { resumeFromRunId } : {}),
         }),
       })
 
@@ -204,6 +215,12 @@ export default function AICommandCenter({
           errorPayload?.action?.type === 'OPEN_DEFAULT_PAGE_SETTINGS'
         ) {
           setBlockingAction(errorPayload.action as BlockingAction)
+        } else if (actionableCode === 'PIXEL_REQUIRED') {
+          setBlockingAction({
+            type: 'OPEN_DEFAULT_PAGE_SETTINGS',
+            tenantId: selectedTenantId || undefined,
+            adAccountId: selectedAccount.id,
+          })
         } else if (actionableCode === 'PAYMENT_METHOD_REQUIRED') {
           setBlockingAction({
             type: 'RESOLVE_PAYMENT_METHOD',
@@ -334,6 +351,12 @@ export default function AICommandCenter({
             errorData?.action?.type === 'OPEN_DEFAULT_PAGE_SETTINGS'
           ) {
             setBlockingAction(errorData.action as BlockingAction)
+          } else if (errorData?.code === 'PIXEL_REQUIRED' || errorData?.category === 'pixel_required') {
+            setBlockingAction({
+              type: 'OPEN_DEFAULT_PAGE_SETTINGS',
+              tenantId: selectedTenantId || undefined,
+              adAccountId: selectedAccount?.id,
+            })
           } else if (errorData?.code === 'PAYMENT_METHOD_REQUIRED') {
             setBlockingAction({
               type: 'RESOLVE_PAYMENT_METHOD',
@@ -377,14 +400,14 @@ export default function AICommandCenter({
               key={tab.id}
               type="button"
               onClick={() => switchTab(tab.id)}
-              className={`flex items-center gap-1.5 px-3 py-2 text-xs font-medium border-b-2 transition-colors ${
+              className={`flex items-center gap-1 px-2 xl:px-3 py-2 text-[11px] xl:text-xs font-medium border-b-2 transition-colors ${
                 isActive
                   ? 'border-facebook-600 text-facebook-600'
                   : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
               }`}
             >
-              <Icon className="w-3.5 h-3.5" />
-              {tab.label}
+              <Icon className="w-3.5 h-3.5 shrink-0" />
+          
             </button>
           )
         })}
@@ -448,12 +471,19 @@ export default function AICommandCenter({
           />
         )}
 
-        {activeTab === 'materials' && (
+        {activeTab === 'materials' && selectedAccount && selectedTenantId && (
+          <MaterialsTabInline
+            tenantId={selectedTenantId}
+            adAccountId={selectedAccount.id}
+            adAccountName={selectedAccount.name || selectedAccount.id}
+          />
+        )}
+        {activeTab === 'materials' && (!selectedAccount || !selectedTenantId) && (
           <div className="text-center py-8 border border-dashed border-gray-300 rounded-lg">
             <PhotoIcon className="w-12 h-12 text-gray-300 mx-auto mb-3" />
             <p className="text-gray-500">Materials</p>
             <p className="text-sm text-gray-400 mt-1">
-              Upload and manage creative materials for your ads.
+              Select an ad account to manage creative materials.
             </p>
           </div>
         )}
@@ -466,6 +496,10 @@ export default function AICommandCenter({
             onRunAgain={(cmd) => {
               setCommand(cmd)
               switchTab('command')
+            }}
+            onRetryFromStep={(cmd, runId) => {
+              switchTab('command')
+              void executeCommand(cmd, runId)
             }}
             selectedTenantId={selectedTenantId}
           />
@@ -480,6 +514,8 @@ export default function AICommandCenter({
             setShowBillingInstructions={setShowBillingInstructions}
             onNavigateToDefaultPage={onNavigateToDefaultPage}
             onNavigateToDsaSettings={onNavigateToDsaSettings}
+            selectedTenantId={selectedTenantId}
+            selectedBusinessId={selectedBusinessId}
           />
         )}
       </div>
@@ -635,23 +671,45 @@ function CommandTab({
 /* History Tab                                                        */
 /* ------------------------------------------------------------------ */
 
+function formatDuration(startedAt: string, finishedAt?: string | null): string {
+  if (!finishedAt) return ''
+  const ms = new Date(finishedAt).getTime() - new Date(startedAt).getTime()
+  if (Number.isNaN(ms) || ms < 0) return ''
+  if (ms < 1000) return `${ms}ms`
+  const seconds = Math.round(ms / 1000)
+  if (seconds < 60) return `${seconds}s`
+  return `${Math.floor(seconds / 60)}m ${seconds % 60}s`
+}
+
+function buildCreatedIdsText(ids: Record<string, unknown>): string {
+  return Object.entries(ids)
+    .filter(([, v]) => v)
+    .map(([k, v]) => `${k}: ${v}`)
+    .join('\n')
+}
+
+type StatusFilter = 'all' | 'SUCCESS' | 'PARTIAL' | 'ERROR' | 'RUNNING' | 'PENDING'
+
 function HistoryTab({
   runs,
   loading,
   onRefresh,
   onRunAgain,
+  onRetryFromStep,
   selectedTenantId,
 }: {
   runs: HistoryRun[]
   loading: boolean
   onRefresh: () => void
   onRunAgain: (command: string) => void
+  onRetryFromStep?: (command: string, runId: string) => void
   selectedTenantId?: string | null
 }) {
   const [expandedRunId, setExpandedRunId] = useState<string | null>(null)
   const [runEvents, setRunEvents] = useState<any[]>([])
   const [eventsLoading, setEventsLoading] = useState(false)
   const [copiedId, setCopiedId] = useState<string | null>(null)
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
 
   const fetchRunEvents = async (runId: string) => {
     if (expandedRunId === runId) {
@@ -739,21 +797,36 @@ function HistoryTab({
     return steps
   }
 
+  const filteredRuns = statusFilter === 'all' ? runs : runs.filter((r) => r.status === statusFilter)
+
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
         <h4 className="text-sm font-medium text-gray-700">Recent Runs</h4>
-        <button
-          type="button"
-          onClick={onRefresh}
-          disabled={loading}
-          className="inline-flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 disabled:opacity-50"
-        >
-          <ArrowPathIcon className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
-          Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          <select
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
+            className="rounded border border-gray-300 bg-white px-2 py-1 text-xs text-gray-600"
+          >
+            <option value="all">All</option>
+            <option value="SUCCESS">Success</option>
+            <option value="PARTIAL">Partial</option>
+            <option value="ERROR">Error</option>
+            <option value="RUNNING">Running</option>
+          </select>
+          <button
+            type="button"
+            onClick={onRefresh}
+            disabled={loading}
+            className="inline-flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 disabled:opacity-50"
+          >
+            <ArrowPathIcon className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
+            Refresh
+          </button>
+        </div>
       </div>
-      {runs.length === 0 ? (
+      {filteredRuns.length === 0 ? (
         <div className="text-center py-8 border border-dashed border-gray-300 rounded-lg">
           <DocumentTextIcon className="w-12 h-12 text-gray-300 mx-auto mb-3" />
           <p className="text-gray-500">No runs yet</p>
@@ -761,7 +834,10 @@ function HistoryTab({
         </div>
       ) : (
         <div className="space-y-2">
-          {runs.map((run) => (
+          {filteredRuns.map((run) => {
+            const duration = formatDuration(run.startedAt, run.finishedAt)
+            const hasCreatedIds = run.createdIdsJson && Object.values(run.createdIdsJson).some(Boolean)
+            return (
             <div key={run.id} className="rounded-md border border-gray-200 bg-white overflow-hidden">
               <button
                 type="button"
@@ -772,20 +848,39 @@ function HistoryTab({
                   <p className="text-sm text-gray-900 line-clamp-2">{run.commandText}</p>
                   <StatusBadge status={run.status} />
                 </div>
-                <div className="mt-1 flex items-center gap-3 text-xs text-gray-500">
+                <div className="mt-1 flex flex-wrap items-center gap-3 text-xs text-gray-500">
                   <span>{safeFormatDate(run.startedAt)}</span>
+                  {duration && <span>{duration}</span>}
+                  {typeof (run.summaryJson as any)?.stepsCompleted === 'number' && (
+                    <span>
+                      {(run.summaryJson as any).stepsCompleted}/{(run.summaryJson as any).totalSteps ?? '?'} steps
+                    </span>
+                  )}
                   {(run.retries ?? 0) > 0 && (
                     <span className="text-amber-600">{run.retries} {run.retries === 1 ? 'retry' : 'retries'}</span>
                   )}
-                  {run.createdIdsJson && Object.keys(run.createdIdsJson).length > 0 && (
+                  {hasCreatedIds && (
                     <span className="text-green-600">
-                      {Object.keys(run.createdIdsJson).filter((k) => run.createdIdsJson![k]).length} created
+                      {Object.keys(run.createdIdsJson!).filter((k) => run.createdIdsJson![k]).length} created
                     </span>
                   )}
                 </div>
+                {hasCreatedIds && (
+                  <div className="mt-1.5 flex flex-wrap gap-1.5">
+                    {Object.entries(run.createdIdsJson!).filter(([, v]) => v).map(([key, value]) => (
+                      <span
+                        key={key}
+                        className="inline-flex items-center rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-mono text-gray-600"
+                        title={`${key}: ${value}`}
+                      >
+                        {key.replace(/Id$/, '')}: {String(value)}
+                      </span>
+                    ))}
+                  </div>
+                )}
               </button>
 
-              <div className="flex items-center gap-1 px-3 pb-2">
+              <div className="flex flex-wrap items-center gap-1 px-3 pb-2">
                 <button
                   type="button"
                   onClick={(e) => { e.stopPropagation(); copyToClipboard(run.commandText, `prompt-${run.id}`) }}
@@ -797,6 +892,19 @@ function HistoryTab({
                     'Copy prompt'
                   )}
                 </button>
+                {hasCreatedIds && (
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); copyToClipboard(buildCreatedIdsText(run.createdIdsJson!), `ids-${run.id}`) }}
+                    className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-gray-500 hover:bg-gray-100 hover:text-gray-700"
+                  >
+                    {copiedId === `ids-${run.id}` ? (
+                      <><CheckCircleIcon className="h-3 w-3 text-green-500" /> Copied</>
+                    ) : (
+                      'Copy IDs'
+                    )}
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={(e) => { e.stopPropagation(); onRunAgain(run.commandText) }}
@@ -804,6 +912,15 @@ function HistoryTab({
                 >
                   <ArrowPathIcon className="h-3 w-3" /> Run again
                 </button>
+                {run.status === 'PARTIAL' && onRetryFromStep && run.createdIdsJson && (
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); onRetryFromStep(run.commandText, run.id) }}
+                    className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-amber-600 hover:bg-amber-50 hover:text-amber-800"
+                  >
+                    <ArrowPathIcon className="h-3 w-3" /> Retry from failed step
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={(e) => { e.stopPropagation(); copyToClipboard(buildDebugBundle(run), `debug-${run.id}`) }}
@@ -832,7 +949,7 @@ function HistoryTab({
                 </div>
               )}
             </div>
-          ))}
+          )})}
         </div>
       )}
     </div>
@@ -851,6 +968,8 @@ function SettingsTab({
   setShowBillingInstructions,
   onNavigateToDefaultPage,
   onNavigateToDsaSettings,
+  selectedTenantId,
+  selectedBusinessId,
 }: {
   selectedAccount: FacebookAccount | null
   accountContext?: AICommandCenterProps['accountContext']
@@ -859,7 +978,51 @@ function SettingsTab({
   setShowBillingInstructions: (v: boolean) => void
   onNavigateToDefaultPage?: () => void
   onNavigateToDsaSettings?: (adAccountId: string) => void
+  selectedTenantId?: string | null
+  selectedBusinessId?: string | null
 }) {
+  const [pixels, setPixels] = useState<Array<{ pixelId: string; name: string | null; permissionOk: boolean }>>([])
+  const [defaultPixelId, setDefaultPixelId] = useState<string | null>(accountContext?.defaultPixelId ?? null)
+  const [pixelSaving, setPixelSaving] = useState(false)
+
+  useEffect(() => {
+    setDefaultPixelId(accountContext?.defaultPixelId ?? null)
+  }, [accountContext?.defaultPixelId])
+
+  useEffect(() => {
+    if (!selectedAccount || !selectedTenantId || !selectedBusinessId) return
+    const actId = encodeURIComponent(selectedAccount.id)
+    const bizId = encodeURIComponent(selectedBusinessId)
+    fetch(`/api/tenants/${selectedTenantId}/businesses/${bizId}/ad-accounts/${actId}/pixels`, {
+      headers: { 'x-tenant-id': selectedTenantId },
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => { if (data?.pixels) setPixels(data.pixels) })
+      .catch(() => {})
+  }, [selectedAccount, selectedTenantId, selectedBusinessId])
+
+  const handlePixelChange = async (pixelId: string | null) => {
+    if (!selectedAccount || !selectedTenantId || !selectedBusinessId) return
+    setPixelSaving(true)
+    try {
+      const actId = encodeURIComponent(selectedAccount.id)
+      const bizId = encodeURIComponent(selectedBusinessId)
+      const res = await fetch(
+        `/api/tenants/${selectedTenantId}/businesses/${bizId}/ad-accounts/${actId}/default-pixel`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-tenant-id': selectedTenantId },
+          body: JSON.stringify({ pixelId }),
+        }
+      )
+      if (res.ok) setDefaultPixelId(pixelId)
+    } catch {
+      // Ignore for now
+    } finally {
+      setPixelSaving(false)
+    }
+  }
+
   if (!selectedAccount) {
     return (
       <div className="text-center py-8 border border-dashed border-gray-300 rounded-lg">
@@ -883,6 +1046,12 @@ function SettingsTab({
           <span className="font-semibold">DSA:</span>{' '}
           {accountContext?.dsaConfigured ? 'Configured' : 'Missing'}
         </p>
+        <p>
+          <span className="font-semibold">Pixel:</span>{' '}
+          {defaultPixelId
+            ? (pixels.find((p) => p.pixelId === defaultPixelId)?.name || defaultPixelId)
+            : 'Not set'}
+        </p>
       </div>
 
       <div>
@@ -891,6 +1060,7 @@ function SettingsTab({
           <HealthChip label="Billing OK" ok={accountContext?.health?.billingOk ?? false} />
           <HealthChip label="DSA OK" ok={accountContext?.health?.dsaOk ?? false} />
           <HealthChip label="Page Connected" ok={accountContext?.health?.pageConnected ?? false} />
+          <HealthChip label="Pixel" ok={accountContext?.health?.pixelConnected ?? Boolean(defaultPixelId)} />
         </div>
       </div>
 
@@ -932,6 +1102,36 @@ function SettingsTab({
           </p>
         )}
       </div>
+
+      <div>
+        <h4 className="text-sm font-medium text-gray-700 mb-2">Default Pixel</h4>
+        {pixels.length > 0 ? (
+          <>
+            <select
+              value={defaultPixelId || ''}
+              onChange={(e) => handlePixelChange(e.target.value || null)}
+              disabled={pixelSaving}
+              className={`w-full rounded border bg-white px-2 py-1.5 text-xs text-gray-700 disabled:opacity-50 ${
+                defaultPixelId ? 'border-gray-300' : 'border-amber-300'
+              }`}
+            >
+              <option value="">None (select to enable conversions)</option>
+              {pixels.map((p) => (
+                <option key={p.pixelId} value={p.pixelId}>
+                  {p.name || p.pixelId}{!p.permissionOk ? ' (no access)' : ''}
+                </option>
+              ))}
+            </select>
+            {!defaultPixelId && (
+              <p className="mt-1 text-[10px] text-amber-600 font-medium">
+                Conversion/leads ad creation will be blocked until a pixel is selected.
+              </p>
+            )}
+          </>
+        ) : (
+          <p className="text-xs text-gray-500">No pixels found. Pixels will load when available.</p>
+        )}
+      </div>
     </div>
   )
 }
@@ -958,6 +1158,13 @@ function StatusBadge({ status }: { status: string }) {
     return (
       <span className="inline-flex items-center rounded border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[10px] text-emerald-700">
         Success
+      </span>
+    )
+  }
+  if (upper === 'PARTIAL') {
+    return (
+      <span className="inline-flex items-center rounded border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] text-amber-700">
+        Partial
       </span>
     )
   }
@@ -1010,6 +1217,25 @@ function ExecutionProgress({
         />
       </div>
     </div>
+  )
+}
+
+function MaterialsTabInline({
+  tenantId,
+  adAccountId,
+  adAccountName,
+}: {
+  tenantId: string
+  adAccountId: string
+  adAccountName: string
+}) {
+  return (
+    <MaterialsTab
+      tenantId={tenantId}
+      adAccountId={adAccountId}
+      adAccountName={adAccountName}
+      ads={[]}
+    />
   )
 }
 

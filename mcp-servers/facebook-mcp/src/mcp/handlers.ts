@@ -16,6 +16,7 @@ import {
   DuplicateAdSetSchema,
   DuplicateCampaignSchema,
   GetAccountsSchema,
+  GetAdAccountPixelsSchema,
   GetAdSetsSchema,
   GetAdsSchema,
   GetCampaignsSchema,
@@ -84,6 +85,10 @@ export class FacebookToolHandlers {
       case 'set_default_page_for_ad_account': {
         const parsed = parseArgs(SetDefaultPageForAdAccountSchema, args);
         return this.facebookService.setDefaultPageForAdAccount(parsed);
+      }
+      case 'get_ad_account_pixels': {
+        const parsed = parseArgs(GetAdAccountPixelsSchema, args);
+        return this.facebookService.getAdAccountPixels(parsed);
       }
       case 'get_campaigns': {
         const parsed = parseArgs(GetCampaignsSchema, args);

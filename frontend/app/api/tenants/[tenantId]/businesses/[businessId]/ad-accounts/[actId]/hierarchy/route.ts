@@ -6,7 +6,7 @@ import {
   TenantAccessError,
   resolveTenantContext,
 } from '@/lib/tenant-context';
-import { cacheGet, cacheGetStale, cacheSet, isRateLimitMessage, estimateRetryAfterMs } from '@/lib/api-cache';
+import { cacheGet, cacheGetStale, cacheSet, isRateLimitMessage, isCoolingDown, markCooldown, clearCooldown, TTL } from '@/lib/api-cache';
 import { withAccountQueue } from '@/lib/request-queue';
 import type {
   AdAccountHierarchyAd,
@@ -82,13 +82,14 @@ function mapTargeting(raw: any): TargetingSnapshot {
   const countries = Array.isArray(raw?.countries) ? raw.countries.map((v: unknown) => String(v)) : [];
   const interests = Array.isArray(raw?.interests) ? raw.interests.map((v: unknown) => String(v)) : [];
   const behaviors = Array.isArray(raw?.behaviors) ? raw.behaviors.map((v: unknown) => String(v)) : [];
-  const gender = raw?.gender === 'male' || raw?.gender === 'female' || raw?.gender === 'all' ? raw.gender : 'all';
+  const gender: 'male' | 'female' | 'all' | undefined =
+    raw?.gender === 'male' || raw?.gender === 'female' || raw?.gender === 'all' ? raw.gender : undefined;
   const ageMin = typeof raw?.ageMin === 'number' ? raw.ageMin : undefined;
   const ageMax = typeof raw?.ageMax === 'number' ? raw.ageMax : undefined;
   const languages = Array.isArray(raw?.languages) ? raw.languages.map((v: unknown) => String(v)) : [];
   return {
     countries,
-    gender,
+    ...(gender ? { gender } : {}),
     ageMin,
     ageMax,
     interests,
@@ -119,11 +120,19 @@ function buildTargetingSummary(targeting: TargetingSnapshot): string {
     parts.push(targeting.countries.slice(0, 2).map(mapCountry).join(', '));
   }
 
-  if (typeof targeting.ageMin === 'number' || typeof targeting.ageMax === 'number') {
-    const genderLabel =
-      targeting.gender === 'male' ? 'Men' : targeting.gender === 'female' ? 'Women' : 'All genders';
-    parts.push(`${genderLabel} ${targeting.ageMin ?? '?'}-${targeting.ageMax ?? '?'}`);
-  } else if (targeting.gender && targeting.gender !== 'all') {
+  const isDefaultAge =
+    (targeting.ageMin === 18 || targeting.ageMin === undefined) &&
+    (targeting.ageMax === 65 || targeting.ageMax === undefined);
+  const hasExplicitAge = (typeof targeting.ageMin === 'number' || typeof targeting.ageMax === 'number') && !isDefaultAge;
+  const hasExplicitGender = targeting.gender === 'male' || targeting.gender === 'female';
+
+  if (hasExplicitAge) {
+    const genderLabel = hasExplicitGender
+      ? (targeting.gender === 'male' ? 'Men' : 'Women')
+      : '';
+    const ageStr = `${targeting.ageMin ?? '?'}-${targeting.ageMax ?? '?'}`;
+    parts.push(genderLabel ? `${genderLabel} ${ageStr}` : ageStr);
+  } else if (hasExplicitGender) {
     parts.push(targeting.gender === 'male' ? 'Men' : 'Women');
   }
 
@@ -237,6 +246,7 @@ export async function GET(
         where: { tenantId_adAccountId: { tenantId, adAccountId } },
         select: {
           defaultPageId: true,
+          defaultPixelId: true,
           dsaBeneficiary: true,
           dsaPayor: true,
         },
@@ -257,7 +267,7 @@ export async function GET(
     }
 
     const hierarchyCacheKey = ['hierarchy', adAccountId];
-    const cached = cacheGet<AdAccountHierarchyPayload>(hierarchyCacheKey);
+    const cached = cacheGet<AdAccountHierarchyPayload>(hierarchyCacheKey, TTL.HIERARCHY);
     if (cached) {
       return NextResponse.json({
         success: true,
@@ -266,6 +276,21 @@ export async function GET(
         adAccountId,
         ...cached,
       });
+    }
+
+    const cooldown = isCoolingDown(adAccountId);
+    if (cooldown.cooling) {
+      const stale = cacheGetStale<AdAccountHierarchyPayload>(hierarchyCacheKey);
+      if (stale) {
+        return NextResponse.json({
+          success: true, tenantId, businessId, adAccountId,
+          ...stale, rateLimited: true, retryAfterMs: cooldown.retryAfterMs,
+        });
+      }
+      return NextResponse.json(
+        { success: false, error: 'Rate limit cooldown active.', rateLimited: true, retryAfterMs: cooldown.retryAfterMs },
+        { status: 429 }
+      );
     }
 
     const mcpClient = new MCPClient({
@@ -290,13 +315,15 @@ export async function GET(
           return Array.isArray(result) ? result : [];
         }),
       ]);
+      clearCooldown(adAccountId);
     } catch (fetchError) {
       if (isRateLimitMessage(fetchError)) {
+        const retryAfterMs = markCooldown(adAccountId);
         const stale = cacheGetStale<AdAccountHierarchyPayload>(hierarchyCacheKey);
         if (stale) {
           return NextResponse.json({
             success: true, tenantId, businessId, adAccountId,
-            ...stale, rateLimited: true, retryAfterMs: estimateRetryAfterMs(fetchError),
+            ...stale, rateLimited: true, retryAfterMs,
           });
         }
       }
@@ -322,11 +349,12 @@ export async function GET(
         rawAdSets = Array.isArray(adSetResult) ? adSetResult : [];
       } catch (err) {
         if (isRateLimitMessage(err)) {
+          const retryAfterMs = markCooldown(adAccountId);
           const stale = cacheGetStale<AdAccountHierarchyPayload>(hierarchyCacheKey);
           if (stale) {
             return NextResponse.json({
               success: true, tenantId, businessId, adAccountId,
-              ...stale, rateLimited: true, retryAfterMs: estimateRetryAfterMs(err),
+              ...stale, rateLimited: true, retryAfterMs,
             });
           }
         }
@@ -444,6 +472,7 @@ export async function GET(
         name: adAccount.name || adAccount.adAccountId,
         status: adAccount.status || null,
         defaultPageId: settings?.defaultPageId || null,
+        defaultPixelId: settings?.defaultPixelId || null,
         dsaBeneficiary: settings?.dsaBeneficiary || null,
         dsaPayor: settings?.dsaPayor || null,
         dsaConfigured: Boolean(settings?.dsaBeneficiary && settings?.dsaPayor),
@@ -459,6 +488,7 @@ export async function GET(
         billingOk: String(adAccount.status || '').toUpperCase() !== 'DISABLED',
         dsaOk: Boolean(settings?.dsaBeneficiary && settings?.dsaPayor),
         pageConnected: Boolean(settings?.defaultPageId),
+        pixelConnected: Boolean(settings?.defaultPixelId),
       },
       campaigns,
       adSets: allAdSets,

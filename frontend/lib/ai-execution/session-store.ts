@@ -15,6 +15,7 @@ export interface ExecutionSession {
   accountId: string;
   businessId?: string;
   requestCookie?: string;
+  previousCreatedIds?: Record<string, string>;
   createdAt: string;
   updatedAt: string;
   status: SessionStatus;
@@ -45,6 +46,7 @@ export function createExecutionSession(input: {
   accountId: string;
   businessId?: string;
   requestCookie?: string;
+  previousCreatedIds?: Record<string, string>;
 }): ExecutionSession {
   const store = getStore();
   pruneExpiredSessions(store);
@@ -58,6 +60,7 @@ export function createExecutionSession(input: {
     accountId: input.accountId,
     businessId: input.businessId,
     requestCookie: input.requestCookie,
+    previousCreatedIds: input.previousCreatedIds,
     createdAt: now,
     updatedAt: now,
     status: 'pending',

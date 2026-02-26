@@ -12,6 +12,7 @@ const AICommandSchema = z.object({
   command: z.string(),
   accountId: z.string(),
   businessId: z.string().min(1).optional(),
+  resumeFromRunId: z.string().optional(),
 });
 
 export const dynamic = 'force-dynamic';
@@ -21,8 +22,18 @@ export async function POST(request: NextRequest) {
   try {
     const context = await resolveTenantContext(request);
     const body = await request.json();
-    const { command, accountId, businessId } = AICommandSchema.parse(body);
+    const { command, accountId, businessId, resumeFromRunId } = AICommandSchema.parse(body);
     const requestCookie = request.headers.get('cookie') || undefined;
+
+    let previousCreatedIds: Record<string, string> | undefined;
+    if (resumeFromRunId) {
+      const { getAiRunById } = await import('@/lib/ai-execution/run-store');
+      const prevRun = await getAiRunById(resumeFromRunId);
+      if (prevRun?.createdIdsJson && typeof prevRun.createdIdsJson === 'object') {
+        previousCreatedIds = prevRun.createdIdsJson as Record<string, string>;
+      }
+    }
+
     const run = await createAiRun({
       userId: context.userId,
       tenantId: context.tenantId,
@@ -39,13 +50,14 @@ export async function POST(request: NextRequest) {
       accountId,
       businessId,
       requestCookie,
+      previousCreatedIds,
     });
 
     return NextResponse.json({
       success: true,
       executionId: session.id,
       runId: run.id,
-      message: 'Execution started',
+      message: resumeFromRunId ? 'Execution resumed from failed step' : 'Execution started',
     });
   } catch (error) {
     if (error instanceof AuthRequiredError) {

@@ -11,6 +11,7 @@ import {
   appendAiRunEvent,
   markAiRunFinished,
   markAiRunRunning,
+  persistEntitySnapshots,
 } from '@/lib/ai-execution/run-store';
 import {
   getExecutionSession,
@@ -26,12 +27,8 @@ function logTimelineEvent(
   eventType: string,
   fields: { stepId?: string; status?: string; summary?: string; label?: string }
 ) {
-  const parts = [`[AI-RUN ${runId ?? '?'}] ${eventType}`];
-  if (fields.stepId) parts.push(`step=${fields.stepId}`);
-  if (fields.label) parts.push(`label=${fields.label}`);
-  if (fields.status) parts.push(`status=${fields.status}`);
-  if (fields.summary) parts.push(fields.summary);
-  console.log(parts.join(' | '));
+  const event = { type: eventType, runId: runId ?? '?', ts: new Date().toISOString(), service: 'ai-execution', ...fields };
+  console.log(JSON.stringify(event));
 }
 
 function getOpenAIClient(): OpenAI {
@@ -84,6 +81,11 @@ export async function GET(request: NextRequest) {
           rationale?: string;
           debugJson?: Record<string, unknown>;
           createdIdsJson?: Record<string, unknown> | null;
+          attempt?: number;
+          durationMs?: number;
+          errorCode?: string;
+          errorSubcode?: string;
+          fbtraceId?: string;
           ts?: string;
         }) => {
           if (!runId) return;
@@ -100,6 +102,11 @@ export async function GET(request: NextRequest) {
               rationale: payload.rationale,
               debugJson: payload.debugJson,
               createdIdsJson: payload.createdIdsJson,
+              attempt: payload.attempt,
+              durationMs: payload.durationMs,
+              errorCode: payload.errorCode,
+              errorSubcode: payload.errorSubcode,
+              fbtraceId: payload.fbtraceId,
               ts: payload.ts,
             });
           } catch {
@@ -165,6 +172,7 @@ export async function GET(request: NextRequest) {
             status: step.status,
             summary: step.summary,
           });
+          const stepDebug = (step.debug || {}) as Record<string, unknown>;
           await persistEvent({
             type: eventType,
             stepId: step.id,
@@ -180,6 +188,13 @@ export async function GET(request: NextRequest) {
               technicalDetails: step.technicalDetails,
             },
             createdIdsJson: (step.createdIds || null) as Record<string, unknown> | null,
+            attempt: step.attempts,
+            durationMs: step.startedAt && step.finishedAt
+              ? new Date(step.finishedAt).getTime() - new Date(step.startedAt).getTime()
+              : undefined,
+            errorCode: stepDebug.code != null ? String(stepDebug.code) : undefined,
+            errorSubcode: stepDebug.subcode != null ? String(stepDebug.subcode) : undefined,
+            fbtraceId: typeof stepDebug.fbtraceId === 'string' ? stepDebug.fbtraceId : undefined,
             ts,
           });
         };
@@ -195,6 +210,7 @@ export async function GET(request: NextRequest) {
             success: boolean;
             summary: any;
             createdIds?: CreatedEntityIds;
+            snapshotJson?: Record<string, unknown> | null;
             ts?: string;
           },
           persist = false
@@ -221,9 +237,13 @@ export async function GET(request: NextRequest) {
             summary: doneSummary.finalMessage || (input.success ? 'Run succeeded' : 'Run failed'),
           });
           if (persist) {
+            const resolvedFinalStatus: 'success' | 'partial' | 'error' =
+              doneSummary.finalStatus === 'partial' ? 'partial'
+                : input.success ? 'success'
+                : 'error';
             await persistEvent({
               type: 'timeline.done',
-              status: input.success ? 'success' : 'error',
+              status: resolvedFinalStatus,
               debugJson: { summary: doneSummary },
               createdIdsJson: (input.createdIds || null) as Record<string, unknown> | null,
               ts,
@@ -232,8 +252,10 @@ export async function GET(request: NextRequest) {
               await markAiRunFinished({
                 runId,
                 success: input.success,
+                finalStatus: resolvedFinalStatus,
                 createdIdsJson: (input.createdIds || null) as Record<string, unknown> | null,
                 summaryJson: doneSummary as Record<string, unknown>,
+                snapshotJson: input.snapshotJson ?? null,
                 retries: typeof doneSummary.retries === 'number' ? doneSummary.retries : undefined,
                 finishedAt: ts,
               }).catch(() => undefined);
@@ -379,6 +401,7 @@ export async function GET(request: NextRequest) {
             businessId: currentSession.businessId,
             tenantId: currentSession.tenantId,
             requestCookie: currentSession.requestCookie,
+            previousCreatedIds: currentSession.previousCreatedIds,
             onStepUpdate: async (_step, allSteps) => {
               updateExecutionSession(executionId, (prev) => ({
                 ...prev,
@@ -402,10 +425,34 @@ export async function GET(request: NextRequest) {
           if (result.blockingError) {
             sendLegacyExecutionError(result.blockingError.message, result.blockingError as any);
           }
+
+          let snapshotJson: Record<string, unknown> | null = null;
+          if (result.success && result.createdIds) {
+            const targetingStep = result.steps.find(
+              (s) => s.type === 'adset' || s.title?.toLowerCase().includes('ad set')
+            );
+            snapshotJson = {
+              campaignId: result.createdIds.campaignId,
+              adSetId: result.createdIds.adSetId,
+              adId: result.createdIds.adId,
+              pixelId: result.createdIds.pixelId ?? null,
+              command: currentSession.command,
+              adAccountId: currentSession.accountId,
+              targetingDebug: targetingStep?.meta?.resolvedTargeting ?? targetingStep?.meta ?? null,
+              displayTargetingSummary: targetingStep?.meta?.displayTargetingSummary ?? null,
+              createdAt: new Date().toISOString(),
+            };
+          }
+
+          if (runId && result.entitySnapshots && result.entitySnapshots.length > 0) {
+            await persistEntitySnapshots(runId, result.entitySnapshots).catch(() => undefined);
+          }
+
           await sendTimelineDone({
             success: result.success,
             summary: result.summary,
             createdIds: result.createdIds || result.summary.createdIds,
+            snapshotJson,
           }, true);
 
           controller.close();

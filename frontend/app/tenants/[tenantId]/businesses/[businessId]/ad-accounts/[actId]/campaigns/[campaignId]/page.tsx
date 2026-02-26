@@ -526,10 +526,10 @@ function RateLimitBanner({
       <div className="flex items-center justify-between">
         <div>
           <p className="text-sm font-medium text-amber-800">
-            Meta rate limit reached. Retrying in ~{secondsLeft}s...
+            Meta rate limit reached. Showing last known data. Retry in ~{secondsLeft}s.
           </p>
           <p className="mt-1 text-xs text-amber-700">
-            Showing cached data while waiting. This is normal for accounts with heavy API usage.
+            This is normal for accounts with heavy API usage. Data will refresh automatically.
           </p>
         </div>
         <div className="flex items-center gap-2 ml-3">
@@ -603,7 +603,6 @@ function RealTargetingSummary({
   if (genders.size > 0) {
     const g = Array.from(genders);
     if (g.length === 1 && g[0] !== 'all') parts.push(g[0] === 'male' ? 'Men' : 'Women');
-    else parts.push('All genders');
   }
 
   return (

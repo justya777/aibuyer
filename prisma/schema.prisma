@@ -38,6 +38,7 @@ enum AiRunStatus {
   PENDING
   RUNNING
   SUCCESS
+  PARTIAL
   ERROR
 }
 
@@ -70,23 +71,27 @@ model Tenant {
   assets             TenantAsset[]
   adAccounts         TenantAdAccount[]
   pages              TenantPage[]
+  pixels             TenantPixel[]
   adAccountSettings  AdAccountSettings[]
   auditLogs          AuditLog[]
   activeUsers        User[]              @relation("ActiveTenant")
 }
 
 model BusinessPortfolio {
-  id         String   @id @default(cuid())
+  id         String    @id @default(cuid())
   tenantId   String
   businessId String
   label      String?
   lastSyncAt DateTime?
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
-  tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  deletedAt  DateTime?
+  deletedBy  String?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  tenant     Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@unique([tenantId, businessId])
   @@index([tenantId, createdAt])
+  @@index([tenantId, deletedAt])
 }
 
 model TenantMember {
@@ -171,19 +176,40 @@ model TenantPage {
   @@index([tenantId, source])
 }
 
+model TenantPixel {
+  id           String   @id @default(cuid())
+  tenantId     String
+  businessId   String?
+  adAccountId  String?
+  pixelId      String
+  name         String?
+  ownerBmId    String?
+  verified     Boolean  @default(false)
+  permissionOk Boolean  @default(true)
+  lastSeenAt   DateTime @default(now())
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, pixelId])
+  @@index([tenantId, adAccountId])
+  @@index([pixelId])
+}
+
 model AdAccountSettings {
-  id             String    @id @default(cuid())
-  tenantId       String
-  businessId     String?
-  adAccountId    String
-  defaultPageId  String?
-  dsaBeneficiary String?
-  dsaPayor       String?
-  dsaSource      DsaSource @default(MANUAL)
-  dsaUpdatedAt   DateTime  @default(now())
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
-  tenant         Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  id              String    @id @default(cuid())
+  tenantId        String
+  businessId      String?
+  adAccountId     String
+  defaultPageId   String?
+  defaultPixelId  String?
+  dsaBeneficiary  String?
+  dsaPayor        String?
+  dsaSource       DsaSource @default(MANUAL)
+  dsaUpdatedAt    DateTime  @default(now())
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  tenant          Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@unique([tenantId, adAccountId])
   @@index([tenantId, businessId])
@@ -203,31 +229,54 @@ model AiRun {
   finishedAt     DateTime?
   createdIdsJson Json?
   summaryJson    Json?
+  snapshotJson   Json?
   retries        Int         @default(0)
   createdAt      DateTime    @default(now())
   updatedAt      DateTime    @updatedAt
   events         AiRunEvent[]
+  snapshots      AiRunSnapshot[]
 
   @@index([tenantId, adAccountId, startedAt])
   @@index([tenantId, businessId, startedAt])
   @@index([userId, startedAt])
 }
 
+model AiRunSnapshot {
+  id               String   @id @default(cuid())
+  runId            String
+  entityType       String
+  entityId         String
+  sanitizedPayload Json
+  createdAt        DateTime @default(now())
+  run              AiRun    @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@unique([runId, entityType, entityId])
+  @@index([runId])
+  @@index([entityType, entityId])
+}
+
 model AiRunEvent {
-  id             String   @id @default(cuid())
-  runId          String
-  type           String
-  stepId         String?
-  label          String?
-  summary        String?
-  status         String?
-  userTitle      String?
-  userMessage    String?
-  rationale      String?
-  debugJson      Json?
-  createdIdsJson Json?
-  ts             DateTime @default(now())
-  run            AiRun    @relation(fields: [runId], references: [id], onDelete: Cascade)
+  id               String   @id @default(cuid())
+  runId            String
+  type             String
+  stepId           String?
+  label            String?
+  summary          String?
+  status           String?
+  userTitle        String?
+  userMessage      String?
+  rationale        String?
+  debugJson        Json?
+  createdIdsJson   Json?
+  requestPayload   Json?
+  sanitizedPayload Json?
+  attempt          Int?
+  durationMs       Int?
+  errorCode        String?
+  errorSubcode     String?
+  fbtraceId        String?
+  ts               DateTime @default(now())
+  run              AiRun    @relation(fields: [runId], references: [id], onDelete: Cascade)
 
   @@index([runId, ts])
   @@index([type, ts])

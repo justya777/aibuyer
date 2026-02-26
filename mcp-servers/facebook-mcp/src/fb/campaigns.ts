@@ -8,6 +8,7 @@ import type {
 import { normalizeAdAccountId } from './core/tenant-registry.js';
 import type { RequestContext } from './core/types.js';
 import { GraphClient } from './core/graph-client.js';
+import { graphQuery } from './core/query-builder.js';
 
 function mapCampaignStatus(status: string): 'active' | 'paused' | 'deleted' {
   switch ((status || '').toUpperCase()) {
@@ -95,15 +96,16 @@ export class CampaignsApi {
             'WITH_ISSUES',
           ];
 
+    const query = graphQuery()
+      .withLimit(params.limit || 50)
+      .withFields(['id', 'name', 'status', 'effective_status', 'objective', 'account_id', 'created_time', 'updated_time', 'start_time', 'stop_time', 'daily_budget', 'lifetime_budget', 'budget_remaining'])
+      .withEffectiveStatus(effectiveStatus)
+      .build();
+
     const response = await this.graphClient.request<{ data?: Array<Record<string, unknown>> }>(ctx, {
       method: 'GET',
       path: `${accountId}/campaigns`,
-      query: {
-        limit: params.limit || 50,
-        fields:
-          'id,name,status,effective_status,objective,account_id,created_time,updated_time,start_time,stop_time,daily_budget,lifetime_budget,budget_remaining',
-        effective_status: JSON.stringify(effectiveStatus),
-      },
+      query,
     });
 
     return (response.data.data || []).map((campaign) => mapCampaign(campaign));

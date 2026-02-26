@@ -9,6 +9,8 @@ import type {
 } from '../../../shared/types';
 import { normalizeExecutionError } from './error-normalizer';
 import { parseTargetingConstraints, enforceTargetingConstraints } from './constraint-parser';
+import { RetryStateMachine, FixCategory } from './retry-state-machine';
+import { RunLogger } from './run-logger';
 import { facebookTools } from './facebook-tools';
 import {
   appendStepFixes,
@@ -20,6 +22,14 @@ import {
   markStepSuccess,
   registerStepAttempt,
 } from './step-factory';
+
+function emitRunLog(
+  type: string,
+  data: Record<string, unknown>
+): void {
+  const event = { type, ts: new Date().toISOString(), ...data };
+  console.log(JSON.stringify({ ...event, service: 'ai-execution' }));
+}
 
 type RawAction = {
   type: string;
@@ -38,6 +48,7 @@ export interface RunAiExecutionInput {
   businessId?: string;
   tenantId: string;
   requestCookie?: string | null;
+  previousCreatedIds?: Record<string, string>;
   onStepUpdate?: (step: ExecutionStep, allSteps: ExecutionStep[]) => Promise<void> | void;
 }
 
@@ -49,10 +60,11 @@ export interface RunAiExecutionResult {
   success: boolean;
   createdIds?: CreatedEntityIds;
   blockingError?: ExecutionBlockingError;
+  entitySnapshots?: Array<{ entityType: string; entityId: string; sanitizedPayload: Record<string, unknown> }>;
 }
 
 export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiExecutionResult> {
-  const { openai, mcpClient, command, accountId, businessId, tenantId, requestCookie, onStepUpdate } = input;
+  const { openai, mcpClient, command, accountId, businessId, tenantId, requestCookie, previousCreatedIds, onStepUpdate } = input;
   const appBaseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
   const internalHeaders: HeadersInit = {
     'Content-Type': 'application/json',
@@ -157,6 +169,7 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
   );
 
   const actions: RawAction[] = [];
+  const entitySnapshots: Array<{ entityType: string; entityId: string; sanitizedPayload: Record<string, unknown> }> = [];
   const adsMatch = command.match(/(\d+)\s*ads?/i);
   const requestedAdCount = adsMatch ? parseInt(adsMatch[1], 10) : 1;
   const materialAssignmentsList = buildMaterialAssignmentsList(
@@ -165,17 +178,27 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
     requestedAdCount
   );
 
-  const messages: any[] = [
-    { role: 'system', content: systemPrompt },
-    { role: 'user', content: `Parse and execute this command: "${command}"` },
-  ];
-
   let conversationComplete = false;
-  let campaignId: string | null = null;
+  let campaignId: string | null = previousCreatedIds?.campaignId || null;
   const toolFailureCounts: Record<string, number> = {};
   const MAX_CONSECUTIVE_TOOL_FAILURES = 3;
+  const retryMachine = new RetryStateMachine();
   let blockingError: string | null = null;
   const isManagementCommand = isManagementStyleCommand(command);
+  const isResumeFromPartial = !!previousCreatedIds?.campaignId;
+
+  const messages: any[] = [
+    { role: 'system', content: systemPrompt },
+  ];
+  if (isResumeFromPartial) {
+    const prevAdSetId = previousCreatedIds?.adSetId;
+    const resumeContext = prevAdSetId
+      ? `Campaign (${campaignId}) and Ad Set (${prevAdSetId}) were already created. Resume from ad creation.`
+      : `Campaign was already created with ID: ${campaignId}. Do NOT create a new campaign. Resume from ad set creation using this campaign ID.`;
+    messages.push({ role: 'user', content: `${resumeContext}\n\nOriginal command: "${command}"` });
+  } else {
+    messages.push({ role: 'user', content: `Parse and execute this command: "${command}"` });
+  }
 
   let iteration = 0;
   while (!conversationComplete && iteration < 15) {
@@ -198,6 +221,7 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
     }
 
     const toolResults: any[] = [];
+    const iterationFixDedup = new Set<string>();
     const bundledCreateAdSetTool = message.tool_calls.find(
       (toolCall) => toolCall.function.name === 'create_adset'
     );
@@ -215,10 +239,17 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
         `Executing ${descriptor.title.toLowerCase()}...`,
         { tool: toolCall.function.name }
       );
-      console.log(`[AI-EXEC] started | tool=${toolCall.function.name} | step=${descriptor.key} | attempt=${step.attempts}`);
+      emitRunLog('step.start', { tool: toolCall.function.name, stepId: descriptor.key, attempt: step.attempts });
       await emitStep(step);
 
       const stepFixesApplied: string[] = [];
+      const pushFix = (msg: string) => {
+        const dedupKey = `${toolCall.function.name}:${msg}`;
+        if (!iterationFixDedup.has(dedupKey)) {
+          iterationFixDedup.add(dedupKey);
+          stepFixesApplied.push(msg);
+        }
+      };
       try {
         let toolArgs = JSON.parse(toolCall.function.arguments);
 
@@ -290,7 +321,7 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
           if (invalidCampaignIds.includes(toolArgs.campaignId) || !toolArgs.campaignId || isPlaceholder) {
             if (campaignId) {
               toolArgs.campaignId = campaignId;
-              stepFixesApplied.push('Used the campaign ID generated in the previous step.');
+              pushFix('Used the campaign ID generated in the previous step.');
             } else {
               throw new Error(
                 'Cannot create adset: No valid campaign ID available. Please create campaign first.'
@@ -299,19 +330,20 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
           }
 
           const hasExplicitBudget = toolArgs.dailyBudget != null || toolArgs.lifetimeBudget != null;
-          if (!hasExplicitBudget) {
+          if (!hasExplicitBudget && retryMachine.canRetry(FixCategory.BUDGET_MISSING)) {
+            retryMachine.markApplied(FixCategory.BUDGET_MISSING);
             const campaignAction = actions.find((a) => a.tool === 'create_campaign' && a.success);
             const campaignDailyBudget = campaignAction?.result?.budget?.daily;
             const campaignLifetimeBudget = campaignAction?.result?.budget?.lifetime;
             if (campaignDailyBudget != null) {
               toolArgs.dailyBudget = campaignDailyBudget;
-              stepFixesApplied.push('Inherited ad set daily budget from campaign settings.');
+              pushFix('Inherited ad set daily budget from campaign settings.');
             } else if (campaignLifetimeBudget != null) {
               toolArgs.lifetimeBudget = campaignLifetimeBudget;
-              stepFixesApplied.push('Inherited ad set lifetime budget from campaign settings.');
+              pushFix('Inherited ad set lifetime budget from campaign settings.');
             } else {
               toolArgs.dailyBudget = 1500;
-              stepFixesApplied.push('Applied a safe fallback daily budget of $15/day.');
+              pushFix('Applied a safe fallback daily budget of $15/day.');
             }
           }
 
@@ -320,7 +352,7 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
               action.tool === 'create_adset' &&
               !action.success &&
               typeof action.error === 'string' &&
-              action.error.includes('Bid amount required')
+              (action.error.includes('Bid amount required') || action.error.toLowerCase().includes('bid_amount'))
           );
           const previousAdSetAdvantageAudienceError = actions.some(
             (action) =>
@@ -334,13 +366,21 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
             const numericBidAmount =
               typeof toolArgs.bidAmount === 'number' ? toolArgs.bidAmount : Number(toolArgs.bidAmount);
             if (!Number.isFinite(numericBidAmount) || numericBidAmount <= 0) {
+              if (!retryMachine.wasApplied(FixCategory.BID_REQUIRED)) {
+                retryMachine.markApplied(FixCategory.BID_REQUIRED);
+              }
               const numericDailyBudget = Number(toolArgs.dailyBudget ?? 0);
+              const campaignAction = actions.find((a) => a.tool === 'create_campaign' && a.success);
+              const campaignBudget = campaignAction?.result?.budget?.daily ?? 0;
+              const budgetForCalc = numericDailyBudget > 0 ? numericDailyBudget : Number(campaignBudget);
               const derivedBidAmount =
-                Number.isFinite(numericDailyBudget) && numericDailyBudget > 0
-                  ? Math.max(100, Math.floor(numericDailyBudget * 0.2))
-                  : 300;
+                Number.isFinite(budgetForCalc) && budgetForCalc > 0
+                  ? Math.max(100, Math.floor(budgetForCalc * 0.2))
+                  : 500;
               toolArgs.bidAmount = derivedBidAmount;
-              stepFixesApplied.push('Added a fallback bid cap based on budget and retried.');
+              if (!retryMachine.wasApplied(FixCategory.BID_REQUIRED)) {
+                pushFix(`Set bid_amount=${derivedBidAmount} (20% of budget) to satisfy Meta requirement.`);
+              }
             }
           }
 
@@ -352,17 +392,22 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
               advantageAudience: normalizedAdvantageAudience,
             };
             delete toolArgs.targeting.advantage_audience;
-            stepFixesApplied.push('Normalized Advantage Audience targeting format.');
+            if (!retryMachine.wasApplied(FixCategory.ADVANTAGE_AUDIENCE)) {
+              retryMachine.markApplied(FixCategory.ADVANTAGE_AUDIENCE);
+              pushFix('Normalized Advantage Audience targeting format.');
+            }
           }
 
-          if (previousAdSetAdvantageAudienceError && !toolArgs.targeting?.targetingAutomation) {
-            toolArgs.targeting = {
-              ...(toolArgs.targeting || {}),
-              targetingAutomation: {
-                advantageAudience: 0,
-              },
+          toolArgs.targeting = toolArgs.targeting || {};
+          if (toolArgs.targeting.targetingAutomation?.advantageAudience == null) {
+            toolArgs.targeting.targetingAutomation = {
+              ...(toolArgs.targeting.targetingAutomation || {}),
+              advantageAudience: 0,
             };
-            stepFixesApplied.push('Disabled Advantage Audience to satisfy Meta requirement.');
+            if (previousAdSetAdvantageAudienceError && !retryMachine.wasApplied(FixCategory.ADVANTAGE_AUDIENCE)) {
+              retryMachine.markApplied(FixCategory.ADVANTAGE_AUDIENCE);
+              pushFix('Set targetingAutomation.advantageAudience to satisfy Meta requirement.');
+            }
           }
 
           const campaignAction = actions.find((a) => a.tool === 'create_campaign' && a.success);
@@ -374,11 +419,11 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
               toolArgs.optimizationGoal === 'LEAD_GENERATION'
             ) {
               toolArgs.optimizationGoal = 'LEAD_GENERATION';
-              stepFixesApplied.push('Aligned optimization goal with leads objective.');
+              pushFix('Aligned optimization goal with leads objective.');
             }
             if (!toolArgs.billingEvent) {
               toolArgs.billingEvent = 'IMPRESSIONS';
-              stepFixesApplied.push('Applied default billing event for leads objective.');
+              pushFix('Applied default billing event for leads objective.');
             }
           }
 
@@ -386,15 +431,15 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
             const normalized = normalizeLocalesForMcp(toolArgs.targeting.locales);
             if (normalized.length > 0) {
               toolArgs.targeting.locales = normalized;
-              stepFixesApplied.push(`Passing language targeting to Meta for resolution: [${normalized.join(', ')}].`);
+              pushFix(`Passing language targeting to Meta for resolution: [${normalized.join(', ')}].`);
             } else {
               const constraints = parseTargetingConstraints(command);
               if (constraints.language) {
                 toolArgs.targeting.locales = [constraints.language];
-                stepFixesApplied.push(`Restored ${constraints.language} language targeting from user command.`);
+                pushFix(`Restored ${constraints.language} language targeting from user command.`);
               } else {
                 delete toolArgs.targeting.locales;
-                stepFixesApplied.push(
+                pushFix(
                   'Removed empty locale targeting; no language was specified in the command.'
                 );
               }
@@ -404,11 +449,81 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
           const constraints = parseTargetingConstraints(command);
           const constraintFixes = enforceTargetingConstraints(toolArgs, constraints);
           for (const fix of constraintFixes) {
-            stepFixesApplied.push(fix);
+            pushFix(fix);
           }
           if (constraintFixes.length > 0) {
-            console.log(`[AI-CONSTRAINT] tool=${toolCall.function.name} | ${constraintFixes.join('; ')}`);
+            emitRunLog('autofix.applied', { tool: toolCall.function.name, fixes: constraintFixes, category: 'constraint' });
           }
+
+          const campaignActionForPixel = actions.find((a) => a.tool === 'create_campaign' && a.success);
+          const objectiveForPixel = campaignActionForPixel?.result?.objective;
+          const needsPixel = objectiveForPixel === 'OUTCOME_LEADS' ||
+            objectiveForPixel === 'OUTCOME_SALES' ||
+            objectiveForPixel === 'CONVERSIONS' ||
+            toolArgs.optimizationGoal === 'OFFSITE_CONVERSIONS';
+          if (needsPixel) {
+            let resolvedPixelId = toolArgs.promotedObject?.pixel_id || toolArgs.promotedObject?.pixelId || null;
+            if (!resolvedPixelId) {
+              try {
+                const pixelResp = await fetch(
+                  `${appBaseUrl}/api/tenants/${tenantId}/businesses/${businessId}/ad-accounts/${accountId}/pixel-status`,
+                  { method: 'GET', headers: internalHeaders }
+                );
+                if (pixelResp.ok) {
+                  const pixelData = await pixelResp.json();
+                  resolvedPixelId = pixelData.defaultPixelId || null;
+                }
+              } catch {
+                emitRunLog('step.update', { tool: toolCall.function.name, summary: 'Pixel status fetch failed' });
+              }
+            }
+
+            if (!resolvedPixelId) {
+              const pixelRequiredError: ExecutionBlockingError = {
+                code: 'PIXEL_REQUIRED',
+                category: 'pixel_required',
+                message: 'Pixel is not selected for this Ad Account. Select a Pixel to run ads with Website Events.',
+                action: { type: 'OPEN_DEFAULT_PAGE_SETTINGS' },
+              };
+              emitRunLog('execution.blocked', { reason: 'pixel_required', tool: toolCall.function.name });
+              return {
+                steps: listExecutionSteps(stepRegistry).map(cloneStep),
+                summary: {
+                  totalSteps: actions.length,
+                  stepsCompleted: actions.filter((a) => a.success).length,
+                  retries: 0,
+                  finalStatus: 'error',
+                  finalMessage: pixelRequiredError.message,
+                },
+                reasoning: 'Pixel is required for conversion campaigns but none is selected.',
+                message: pixelRequiredError.message,
+                success: false,
+                blockingError: pixelRequiredError,
+                entitySnapshots,
+              };
+            }
+
+            toolArgs.promotedObject = {
+              ...(toolArgs.promotedObject || {}),
+              pixelId: resolvedPixelId,
+            };
+            pushFix(`Attached pixel ${resolvedPixelId} for Website Events / conversion tracking.`);
+            emitRunLog('pixel.attached', { pixelId: resolvedPixelId, tool: toolCall.function.name });
+          }
+
+          const resolvedTargeting = toolArgs.targeting || {};
+          emitRunLog('step.update', {
+            tool: toolCall.function.name,
+            summary: 'Resolved targeting payload',
+            resolvedTargeting: {
+              locales: resolvedTargeting.locales,
+              genders: resolvedTargeting.genders,
+              countries: resolvedTargeting.geoLocations?.countries,
+              ageMin: resolvedTargeting.ageMin,
+              ageMax: resolvedTargeting.ageMax,
+              language: constraints.language,
+            },
+          });
         }
 
         if (toolCall.function.name === 'create_ad') {
@@ -440,7 +555,7 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
           if (invalidAdSetIds.includes(toolArgs.adSetId) || !toolArgs.adSetId || isPlaceholder) {
             if (storedAdSetId) {
               toolArgs.adSetId = storedAdSetId;
-              stepFixesApplied.push('Used the ad set ID generated in the previous step.');
+              pushFix('Used the ad set ID generated in the previous step.');
             } else {
               throw new Error('Cannot create ad: No valid adset ID available. Please create adset first.');
             }
@@ -455,7 +570,7 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
             creative.linkUrl = parsed.websiteUrl;
             if (!creative.urlParameters) {
               creative.urlParameters = parsed.urlParameters;
-              stepFixesApplied.push('Extracted tracking query parameters into URL parameters field.');
+              pushFix('Extracted tracking query parameters into URL parameters field.');
             }
           }
 
@@ -491,10 +606,10 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
           ) {
             if (imageFromMaterials) {
               creative.imageUrl = imageFromMaterials.fileUrl;
-              stepFixesApplied.push('Replaced invalid image URL with uploaded material URL.');
+              pushFix('Replaced invalid image URL with uploaded material URL.');
             } else {
               delete creative.imageUrl;
-              stepFixesApplied.push('Removed invalid image URL from ad creative payload.');
+              pushFix('Removed invalid image URL from ad creative payload.');
             }
           }
 
@@ -505,29 +620,29 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
           ) {
             if (videoFromMaterials) {
               creative.videoUrl = videoFromMaterials.fileUrl;
-              stepFixesApplied.push('Replaced invalid video URL with uploaded material URL.');
+              pushFix('Replaced invalid video URL with uploaded material URL.');
             } else {
               delete creative.videoUrl;
-              stepFixesApplied.push('Removed invalid video URL from ad creative payload.');
+              pushFix('Removed invalid video URL from ad creative payload.');
             }
           }
 
           if (typeof creative.imageUrl === 'string' && creative.imageUrl.endsWith('.mp4')) {
             creative.videoUrl = creative.imageUrl;
             delete creative.imageUrl;
-            stepFixesApplied.push('Moved MP4 media from image slot to video slot.');
+            pushFix('Moved MP4 media from image slot to video slot.');
           }
 
           if (!creative.imageUrl && !creative.videoUrl) {
             if (preferVideo && videoFromMaterials) {
               creative.videoUrl = videoFromMaterials.fileUrl;
-              stepFixesApplied.push('Added video creative from uploaded materials.');
+              pushFix('Added video creative from uploaded materials.');
             } else if (imageFromMaterials) {
               creative.imageUrl = imageFromMaterials.fileUrl;
-              stepFixesApplied.push('Added image creative from uploaded materials.');
+              pushFix('Added image creative from uploaded materials.');
             } else if (videoFromMaterials) {
               creative.videoUrl = videoFromMaterials.fileUrl;
-              stepFixesApplied.push('Added video creative from uploaded materials.');
+              pushFix('Added video creative from uploaded materials.');
             }
           }
 
@@ -537,7 +652,7 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
               availableMaterials.find((m: any) => m.category === 'image');
             if (thumbnailImage) {
               creative.imageUrl = thumbnailImage.fileUrl;
-              stepFixesApplied.push('Added thumbnail image required for video ad.');
+              pushFix('Added thumbnail image required for video ad.');
             }
           }
 
@@ -549,7 +664,7 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
               if (parsed.urlParameters && !creative.urlParameters) {
                 creative.urlParameters = parsed.urlParameters;
               }
-              stepFixesApplied.push('Extracted destination URL from command text.');
+              pushFix('Extracted destination URL from command text.');
             } else {
               throw new Error(
                 'Missing required linkUrl in ad creative. Please include a destination URL in your command.'
@@ -559,11 +674,11 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
 
           if (!creative.title) {
             creative.title = toolArgs.name || `Ad ${adsCreatedSoFar + 1}`;
-            stepFixesApplied.push('Added fallback ad title.');
+            pushFix('Added fallback ad title.');
           }
           if (!creative.body) {
             creative.body = 'Check this out!';
-            stepFixesApplied.push('Added fallback ad body text.');
+            pushFix('Added fallback ad body text.');
           }
         }
 
@@ -571,7 +686,7 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
           const existingFixes = new Set(stepRegistry.byKey.get(descriptor.key)?.fixesApplied || []);
           const newFixes = stepFixesApplied.filter((f) => !existingFixes.has(f));
           if (newFixes.length > 0) {
-            console.log(`[AI-AUTOFIX] tool=${toolCall.function.name} | ${newFixes.join('; ')}`);
+            emitRunLog('autofix.applied', { tool: toolCall.function.name, fixes: newFixes, category: 'sanitization' });
           }
           const withFixes = appendStepFixes(stepRegistry, descriptor.key, stepFixesApplied);
           await emitStep(withFixes);
@@ -585,6 +700,25 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
 
         if (toolCall.function.name === 'create_campaign' && result?.id) {
           campaignId = result.id;
+        }
+
+        if (result?.id && (toolCall.function.name === 'create_campaign' || toolCall.function.name === 'create_adset' || toolCall.function.name === 'create_ad')) {
+          const entityType = toolCall.function.name === 'create_campaign' ? 'campaign'
+            : toolCall.function.name === 'create_adset' ? 'adset' : 'ad';
+          const snapshotPayload: Record<string, unknown> = {
+            ...toolArgs,
+            _resultId: String(result.id),
+            _resultStatus: result.status,
+            _resultName: result.name,
+          };
+          if (toolArgs.promotedObject?.pixelId) {
+            snapshotPayload._pixelId = toolArgs.promotedObject.pixelId;
+          }
+          entitySnapshots.push({
+            entityType,
+            entityId: String(result.id),
+            sanitizedPayload: snapshotPayload,
+          });
         }
 
         actions.push({
@@ -618,7 +752,7 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
           meta: successSummary.meta,
           createdIds: successSummary.createdIds,
         });
-        console.log(`[AI-RESULT] tool=${toolCall.function.name} | ${successSummary.summary}`);
+        emitRunLog('step.success', { tool: toolCall.function.name, summary: successSummary.summary, createdIds: successSummary.createdIds });
         await emitStep(successStep);
       } catch (error) {
         toolFailureCounts[toolCall.function.name] = (toolFailureCounts[toolCall.function.name] || 0) + 1;
@@ -638,14 +772,29 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
 
         const normalizedError = normalizeExecutionError(errorMessage);
         const attemptCount = toolFailureCounts[toolCall.function.name] || 1;
-        console.log(`[AI-RESULT] error | tool=${toolCall.function.name} | category=${normalizedError.category} | ${normalizedError.userTitle}`);
+        emitRunLog('step.error', {
+          tool: toolCall.function.name,
+          category: normalizedError.category,
+          error: normalizedError.userTitle,
+          errorCode: normalizedError.debug.code,
+          errorSubcode: normalizedError.debug.subcode,
+          fbtraceId: normalizedError.debug.fbtraceId,
+        });
+
+        if (normalizedError.category === 'rate_limit' && retryMachine.canRetry(FixCategory.RATE_LIMIT)) {
+          retryMachine.markApplied(FixCategory.RATE_LIMIT);
+          const attempt = retryMachine.getAttempts(FixCategory.RATE_LIMIT);
+          const delayMs = Math.min(30000, (2 ** attempt) * 1000 + Math.random() * 500);
+          emitRunLog('retry.backoff', { tool: toolCall.function.name, delayMs, attempt });
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
         const willStopForBlockingError =
           normalizedError.blocking || isBlockingConfigurationError(errorMessage);
         const reachedMaxFailures =
           toolFailureCounts[toolCall.function.name] >= MAX_CONSECUTIVE_TOOL_FAILURES;
         const shouldRetry = !willStopForBlockingError && !reachedMaxFailures;
         if (shouldRetry) {
-          console.log(`[AI-RETRY] attempt=${attemptCount} | tool=${toolCall.function.name} | category=${normalizedError.category} | change=${normalizedError.rationale || 'will retry with auto-fixes'}`);
+          emitRunLog('retry.scheduled', { tool: toolCall.function.name, attempt: attemptCount, category: normalizedError.category, appliedChanges: [normalizedError.rationale || 'will retry with auto-fixes'] });
         }
         const autoFixNotes = [...stepFixesApplied];
         if (normalizedError.category === 'bid_required' && !autoFixNotes.some((n) => n.includes('bid'))) {
@@ -709,7 +858,7 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
                 status: 'PAUSED',
                 businessId,
               });
-              console.log(`[AI-ROLLBACK] Paused adset ${createdAdSetAction.result.id} due to billing failure (safer than delete)`);
+              emitRunLog('autofix.applied', { tool: 'update_adset', category: 'rollback', fixes: [`Paused adset ${createdAdSetAction.result.id} due to billing failure`] });
             } catch {
               // Ignore rollback failures.
             }
@@ -721,7 +870,7 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
                 status: 'PAUSED',
                 businessId,
               });
-              console.log(`[AI-ROLLBACK] Paused campaign ${createdCampaignAction.result.id} due to billing failure (safer than delete)`);
+              emitRunLog('autofix.applied', { tool: 'update_campaign', category: 'rollback', fixes: [`Paused campaign ${createdCampaignAction.result.id} due to billing failure`] });
             } catch {
               // Ignore rollback failures.
             }
@@ -813,6 +962,9 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
   const adsetsDuplicated = actions.filter((a) => a.tool === 'duplicate_adset' && a.success).length;
   const adsDuplicated = actions.filter((a) => a.tool === 'duplicate_ad' && a.success).length;
 
+  const adsetsFailed = actions.some((a) => a.tool === 'create_adset' && !a.success);
+  const adsFailed = actions.some((a) => a.tool === 'create_ad' && !a.success);
+
   let summaryMessage = `Executed ${actions.length} actions for: ${command}`;
   if (campaignsDuplicated > 0) {
     summaryMessage = `Duplicated ${campaignsDuplicated} campaign(s) with all ad sets and ads`;
@@ -823,7 +975,24 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
   } else if (campaignsUpdated > 0) {
     summaryMessage = `Updated ${campaignsUpdated} campaign(s): ${command}`;
   } else if (campaignsCreated > 0) {
-    summaryMessage = `Campaign + Ad Set + ${adsCreatedCount} Ad${adsCreatedCount === 1 ? '' : 's'} created successfully.`;
+    const parts: string[] = [];
+    parts.push(`Campaign created`);
+    if (adsetsCreated > 0) {
+      parts.push(`Ad Set created`);
+    } else if (adsetsFailed) {
+      parts.push(`Ad Set failed`);
+    }
+    if (adsCreatedCount > 0) {
+      parts.push(`${adsCreatedCount} Ad${adsCreatedCount === 1 ? '' : 's'} created`);
+    } else if (adsFailed) {
+      parts.push(`0 ads created`);
+    } else if (adsetsCreated > 0) {
+      parts.push(`${adsCreatedCount} Ad${adsCreatedCount === 1 ? '' : 's'} created`);
+    }
+    const allSucceeded = campaignsCreated > 0 && adsetsCreated > 0 && !adsFailed && adsCreatedCount >= requestedAdCount;
+    summaryMessage = allSucceeded
+      ? `Campaign + Ad Set + ${adsCreatedCount} Ad${adsCreatedCount === 1 ? '' : 's'} created successfully.`
+      : `${parts.join('; ')}.`;
   }
 
   const steps = listExecutionSteps(stepRegistry);
@@ -864,6 +1033,7 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
       message: normalizedBlockingError.userMessage,
       createdIds,
       blockingError: blockingPayload,
+      entitySnapshots: entitySnapshots.length > 0 ? entitySnapshots : undefined,
     };
   }
 
@@ -875,6 +1045,7 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
     reasoning,
     message: summaryMessage,
     createdIds,
+    entitySnapshots: entitySnapshots.length > 0 ? entitySnapshots : undefined,
   };
 }
 
@@ -1097,12 +1268,14 @@ function extractCreatedIds(actions: RawAction[]): CreatedEntityIds | undefined {
     .filter((action) => action.tool === 'create_ad' && action.success && action.result?.id)
     .map((action) => String(action.result.id));
 
+  const usedPixelId = createdAdSet?.arguments?.promotedObject?.pixelId;
   const payload: CreatedEntityIds = {
     campaignId: createdCampaign?.result?.id ? String(createdCampaign.result.id) : undefined,
     adSetId: createdAdSet?.result?.id ? String(createdAdSet.result.id) : undefined,
     adId: createdAd?.result?.id ? String(createdAd.result.id) : undefined,
     adSetIds: adSetIds.length > 0 ? adSetIds : undefined,
     adIds: adIds.length > 0 ? adIds : undefined,
+    pixelId: usedPixelId ? String(usedPixelId) : undefined,
   };
 
   if (!payload.campaignId && !payload.adSetId && !payload.adId && !payload.adSetIds && !payload.adIds) {

@@ -7,6 +7,7 @@ import type {
 } from '../types/facebook.js';
 import { GraphClient } from './core/graph-client.js';
 import { PageResolver } from './core/page-resolution.js';
+import { graphQuery } from './core/query-builder.js';
 import { normalizeAdAccountId } from './core/tenant-registry.js';
 import type { RequestContext } from './core/types.js';
 import { attachDsaPayloadForEuTargeting, DsaService } from './dsa.js';
@@ -158,15 +159,16 @@ export class AdSetsApi {
   }
 
   async getAdSets(ctx: RequestContext, params: GetAdSetsParams): Promise<FacebookAdSet[]> {
+    const query = graphQuery()
+      .withLimit(params.limit || 50)
+      .withFields(['id', 'name', 'status', 'optimization_goal', 'billing_event', 'daily_budget', 'lifetime_budget', 'targeting', 'created_time', 'updated_time', 'campaign_id', 'account_id'])
+      .withEffectiveStatus(params.status)
+      .build();
+
     const response = await this.graphClient.request<{ data?: Array<Record<string, unknown>> }>(ctx, {
       method: 'GET',
       path: `${params.campaignId}/adsets`,
-      query: {
-        limit: params.limit || 50,
-        fields:
-          'id,name,status,optimization_goal,billing_event,daily_budget,lifetime_budget,targeting,created_time,updated_time,campaign_id,account_id',
-        effective_status: params.status && params.status.length > 0 ? JSON.stringify(params.status) : undefined,
-      },
+      query,
     });
     return (response.data.data || []).map((record) => mapAdSet(record));
   }

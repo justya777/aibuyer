@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'next/navigation';
 import AICommandCenter from '@/components/AICommandCenter';
 import CampaignRow from '@/components/ad-account/CampaignRow';
@@ -34,9 +34,19 @@ export default function BusinessAdAccountDetailPage() {
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [rateLimitRetry, setRateLimitRetry] = useState<{ retryAfterMs: number; since: number } | null>(null);
+  const [pixelStatus, setPixelStatus] = useState<{ status: string; defaultPixelName: string | null; defaultPixelId: string | null } | null>(null);
+  const [showPixelModal, setShowPixelModal] = useState(false);
+  const [pixelList, setPixelList] = useState<Array<{ pixelId: string; name: string | null; permissionOk: boolean }>>([]);
+  const [pixelListLoading, setPixelListLoading] = useState(false);
+  const [pixelSaving, setPixelSaving] = useState(false);
+  const inflightRef = useRef<AbortController | null>(null);
 
   const load = useCallback(async () => {
     if (!tenantId || !businessId || !actId) return;
+    if (inflightRef.current) inflightRef.current.abort();
+    const controller = new AbortController();
+    inflightRef.current = controller;
     setIsLoading(true);
     setError(null);
     try {
@@ -47,23 +57,41 @@ export default function BusinessAdAccountDetailPage() {
         {
           headers: { 'x-tenant-id': tenantId },
           cache: 'no-store',
+          signal: controller.signal,
         }
       );
       const hierarchyPayload = await response.json();
       if (!response.ok || !hierarchyPayload.success) {
-        throw new Error(hierarchyPayload.error || 'Failed to load ad account hierarchy.');
+        if (hierarchyPayload.rateLimited && hierarchyPayload.retryAfterMs) {
+          setRateLimitRetry({ retryAfterMs: hierarchyPayload.retryAfterMs, since: Date.now() });
+        }
+        if (!hierarchyPayload.success && !hierarchyPayload.rateLimited) {
+          throw new Error(hierarchyPayload.error || 'Failed to load ad account hierarchy.');
+        }
       }
-      setPayload(hierarchyPayload as AdAccountHierarchyPayload);
+      if (hierarchyPayload.rateLimited) {
+        setRateLimitRetry({ retryAfterMs: hierarchyPayload.retryAfterMs ?? 10000, since: Date.now() });
+      } else {
+        setRateLimitRetry(null);
+      }
+      if (hierarchyPayload.campaigns) {
+        setPayload(hierarchyPayload as AdAccountHierarchyPayload);
+      }
     } catch (loadError) {
+      if (loadError instanceof DOMException && loadError.name === 'AbortError') return;
       setError(loadError instanceof Error ? loadError.message : 'Failed to load ad account detail.');
       setPayload(null);
     } finally {
+      if (inflightRef.current === controller) {
+        inflightRef.current = null;
+      }
       setIsLoading(false);
     }
   }, [tenantId, businessId, actId]);
 
   useEffect(() => {
     void load();
+    return () => { inflightRef.current?.abort(); };
   }, [load]);
 
   useEffect(() => {
@@ -72,6 +100,16 @@ export default function BusinessAdAccountDetailPage() {
     }
   }, [tenantId, businessId]);
 
+  useEffect(() => {
+    if (!tenantId || !businessId || !actId) return;
+    fetch(
+      `/api/tenants/${tenantId}/businesses/${encodeURIComponent(businessId)}/ad-accounts/${encodeURIComponent(actId)}/pixel-status`,
+      { headers: { 'x-tenant-id': tenantId }, cache: 'no-store' }
+    )
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => { if (data) setPixelStatus({ status: data.status, defaultPixelName: data.defaultPixelName, defaultPixelId: data.defaultPixelId ?? null }); })
+      .catch(() => {});
+  }, [tenantId, businessId, actId]);
 
   useEffect(() => {
     if (!tenantId || !businessId || !actId) return;
@@ -145,6 +183,60 @@ export default function BusinessAdAccountDetailPage() {
       }
     : null;
 
+  async function openPixelModal() {
+    setShowPixelModal(true);
+    if (pixelList.length > 0) return;
+    setPixelListLoading(true);
+    try {
+      const resp = await fetch(
+        `/api/tenants/${tenantId}/businesses/${encodeURIComponent(businessId)}/ad-accounts/${encodeURIComponent(actId)}/pixels`,
+        { headers: { 'x-tenant-id': tenantId }, cache: 'no-store' }
+      );
+      if (resp.ok) {
+        const data = await resp.json();
+        setPixelList(data.pixels || []);
+      }
+    } catch {
+      // ignore
+    } finally {
+      setPixelListLoading(false);
+    }
+  }
+
+  async function handleSelectPixel(pixelId: string | null) {
+    setPixelSaving(true);
+    try {
+      const resp = await fetch(
+        `/api/tenants/${tenantId}/businesses/${encodeURIComponent(businessId)}/ad-accounts/${encodeURIComponent(actId)}/default-pixel`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-tenant-id': tenantId },
+          body: JSON.stringify({ pixelId }),
+        }
+      );
+      if (resp.ok) {
+        const selectedPixel = pixelId ? pixelList.find((p) => p.pixelId === pixelId) : null;
+        setPixelStatus({
+          status: pixelId ? 'connected' : 'none',
+          defaultPixelName: selectedPixel?.name || null,
+          defaultPixelId: pixelId,
+        });
+        if (payload) {
+          setPayload({
+            ...payload,
+            adAccount: { ...payload.adAccount, defaultPixelId: pixelId },
+            health: { ...payload.health, pixelConnected: Boolean(pixelId) },
+          });
+        }
+        setShowPixelModal(false);
+      }
+    } catch {
+      // ignore
+    } finally {
+      setPixelSaving(false);
+    }
+  }
+
   if (!tenantId || !businessId || !actId) {
     return <main className="p-6 text-red-600">Missing tenantId, businessId, or actId in route.</main>;
   }
@@ -161,14 +253,48 @@ export default function BusinessAdAccountDetailPage() {
             <span className="font-mono">{actId}</span>
           </p>
         </div>
-        <Link
-          href={`/tenants/${tenantId}/businesses/${encodeURIComponent(businessId)}`}
-          className="px-3 py-2 border border-gray-300 rounded-md text-sm hover:bg-gray-50"
-        >
-          Back to BP
-        </Link>
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => void openPixelModal()}
+            className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium cursor-pointer transition-colors ${
+              pixelStatus?.status === 'connected'
+                ? 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+                : pixelStatus?.status === 'no_access'
+                  ? 'bg-amber-50 text-amber-700 hover:bg-amber-100'
+                  : 'bg-red-50 text-red-700 hover:bg-red-100'
+            }`}
+          >
+            <span className={`h-1.5 w-1.5 rounded-full ${
+              pixelStatus?.status === 'connected' ? 'bg-emerald-500' :
+              pixelStatus?.status === 'no_access' ? 'bg-amber-500' :
+              'bg-red-400'
+            }`} />
+            Pixel: {pixelStatus?.status === 'connected'
+              ? (pixelStatus.defaultPixelName || pixelStatus.defaultPixelId || 'Connected')
+              : pixelStatus?.status === 'no_access'
+                ? 'No access'
+                : 'None'}
+            <svg className="h-3 w-3 opacity-50" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+          <Link
+            href={`/tenants/${tenantId}/businesses/${encodeURIComponent(businessId)}`}
+            className="px-3 py-2 border border-gray-300 rounded-md text-sm hover:bg-gray-50"
+          >
+            Back to BP
+          </Link>
+        </div>
       </div>
 
+      {rateLimitRetry && (
+        <RateLimitBanner
+          retryAfterMs={rateLimitRetry.retryAfterMs}
+          since={rateLimitRetry.since}
+          onRetry={() => { setRateLimitRetry(null); void load(); }}
+        />
+      )}
       {error ? <p className="text-sm text-red-600">{error}</p> : null}
       {isLoading ? <p className="text-sm text-gray-600">Loading ad account...</p> : null}
       {createdSummary ? (
@@ -290,6 +416,24 @@ export default function BusinessAdAccountDetailPage() {
                       {payload.adAccount.defaultPageId || 'Not set'}
                     </p>
                   </div>
+                  <div className={`rounded-lg border p-4 ${payload.adAccount.defaultPixelId ? 'border-slate-200 bg-white' : 'border-amber-200 bg-amber-50'}`}>
+                    <p className="text-xs text-slate-500">Default Pixel</p>
+                    <div className="flex items-center gap-2">
+                      <p className={`text-sm font-medium ${payload.adAccount.defaultPixelId ? 'text-slate-900' : 'text-amber-700'}`}>
+                        {pixelStatus?.defaultPixelName || payload.adAccount.defaultPixelId || 'Not set'}
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => void openPixelModal()}
+                        className="text-xs text-blue-600 hover:text-blue-800"
+                      >
+                        Change
+                      </button>
+                    </div>
+                    {!payload.adAccount.defaultPixelId && (
+                      <p className="mt-1 text-xs text-amber-600">Conversion ads will be blocked until a pixel is selected.</p>
+                    )}
+                  </div>
                   <div className="rounded-lg border border-slate-200 bg-white p-4">
                     <p className="text-xs text-slate-500">DSA Status</p>
                     <p className="text-sm font-medium text-slate-900">
@@ -309,6 +453,7 @@ export default function BusinessAdAccountDetailPage() {
               requiresDefaultPage={!payload.adAccount.defaultPageId}
               accountContext={{
                 defaultPageId: payload.adAccount.defaultPageId,
+                defaultPixelId: payload.adAccount.defaultPixelId,
                 dsaConfigured: payload.adAccount.dsaConfigured,
                 health: payload.health,
               }}
@@ -350,7 +495,9 @@ export default function BusinessAdAccountDetailPage() {
                     ? { campaignId: cId, adSetId: asId, adId: aId }
                     : null
                 );
-                setTimeout(() => void load(), 2000);
+                if (result.success) {
+                  setTimeout(() => void load(), 1000);
+                }
               }}
               onCampaignCreated={(campaignId) => {
                 window.location.href = `/tenants/${tenantId}/businesses/${encodeURIComponent(
@@ -361,6 +508,85 @@ export default function BusinessAdAccountDetailPage() {
           </section>
         </div>
       ) : null}
+
+      {showPixelModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
+          <div className="w-full max-w-md rounded-lg border border-gray-200 bg-white p-5 space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold text-gray-900">Select Pixel</h3>
+              <button
+                type="button"
+                onClick={() => setShowPixelModal(false)}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            {pixelListLoading && <p className="text-sm text-gray-600">Loading pixels...</p>}
+
+            {!pixelListLoading && pixelList.length === 0 && (
+              <p className="text-sm text-gray-500">No pixels found for this ad account.</p>
+            )}
+
+            {!pixelListLoading && pixelList.length > 0 && (
+              <div className="space-y-1 max-h-64 overflow-y-auto">
+                {pixelList.map((pixel) => {
+                  const isSelected = pixel.pixelId === (pixelStatus?.defaultPixelId ?? payload?.adAccount.defaultPixelId);
+                  return (
+                    <div
+                      key={pixel.pixelId}
+                      className={`flex items-center justify-between rounded-md border px-3 py-2 text-sm ${
+                        isSelected ? 'border-blue-300 bg-blue-50' : 'border-gray-200 hover:bg-gray-50'
+                      }`}
+                    >
+                      <div>
+                        <p className="font-medium text-gray-900">
+                          {pixel.name || 'Unnamed Pixel'}
+                          {!pixel.permissionOk && <span className="ml-1 text-xs text-amber-600">(no access)</span>}
+                        </p>
+                        <p className="text-xs text-gray-500">{pixel.pixelId}</p>
+                      </div>
+                      {isSelected ? (
+                        <span className="text-xs font-medium text-blue-700">Selected</span>
+                      ) : (
+                        <button
+                          type="button"
+                          disabled={pixelSaving || !pixel.permissionOk}
+                          onClick={() => void handleSelectPixel(pixel.pixelId)}
+                          className="rounded px-2 py-1 text-xs font-medium text-blue-700 border border-blue-300 hover:bg-blue-50 disabled:opacity-50"
+                        >
+                          Select
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            <div className="flex justify-between border-t border-gray-100 pt-3">
+              <button
+                type="button"
+                disabled={pixelSaving}
+                onClick={() => void handleSelectPixel(null)}
+                className="text-xs text-red-600 hover:text-red-800 disabled:opacity-50"
+              >
+                Clear selection
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowPixelModal(false)}
+                className="rounded px-3 py-1 text-sm border border-gray-300 hover:bg-gray-50"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
@@ -385,6 +611,35 @@ function TabButton({ label, selected, onClick }: { label: string; selected: bool
     >
       {label}
     </button>
+  );
+}
+
+function RateLimitBanner({ retryAfterMs, since, onRetry }: { retryAfterMs: number; since: number; onRetry: () => void }) {
+  const [secondsLeft, setSecondsLeft] = useState(Math.ceil(retryAfterMs / 1000));
+
+  useEffect(() => {
+    const tick = () => {
+      const elapsed = Date.now() - since;
+      const remaining = Math.max(0, Math.ceil((retryAfterMs - elapsed) / 1000));
+      setSecondsLeft(remaining);
+      if (remaining <= 0) onRetry();
+    };
+    tick();
+    const timer = setInterval(tick, 1000);
+    return () => clearInterval(timer);
+  }, [retryAfterMs, since, onRetry]);
+
+  return (
+    <div className="rounded-lg border border-amber-300 bg-amber-50 p-3">
+      <div className="flex items-center justify-between">
+        <p className="text-sm text-amber-800">
+          Meta rate limit reached. Showing cached data. {secondsLeft > 0 ? `Retry in ${secondsLeft}s.` : 'Retrying...'}
+        </p>
+        <button type="button" onClick={onRetry} className="rounded-md bg-amber-600 px-3 py-1 text-sm text-white hover:bg-amber-700">
+          Retry now
+        </button>
+      </div>
+    </div>
   );
 }
 
