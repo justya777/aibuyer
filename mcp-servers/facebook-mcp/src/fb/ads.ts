@@ -167,6 +167,13 @@ export class AdsApi {
         payload.url_tags = params.creative.urlParameters;
       }
     }
+
+    if (params.pixelId) {
+      payload.tracking_specs = [
+        { 'action.type': ['offsite_conversion'], fb_pixel: [params.pixelId] },
+      ];
+    }
+
     await this.attachDsaComplianceIfNeeded(ctx, accountId, params.adSetId, payload);
 
     const response = await this.graphClient.request<{ id?: string }>(ctx, {

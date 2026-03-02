@@ -6,6 +6,7 @@ import {
   TenantAccessError,
   resolveTenantContext,
 } from '@/lib/tenant-context';
+import { cacheGet, cacheGetStale, cacheSet, isRateLimitMessage, isCoolingDown, markCooldown, clearCooldown } from '@/lib/api-cache';
 import type { AdAccountHierarchyCampaign, EntityPerformance, TargetingSnapshot } from '@/lib/shared-types';
 
 export const dynamic = 'force-dynamic';
@@ -45,12 +46,14 @@ function emptyPerformance(): EntityPerformance {
 
 async function getInsightsSafe(
   mcpClient: MCPClient,
-  campaignId: string
+  campaignId: string,
+  accountId?: string
 ): Promise<EntityPerformance> {
   try {
     const result = await mcpClient.callTool('get_insights', {
       level: 'campaign',
       campaignId,
+      accountId,
       datePreset: 'last_7d',
     });
     if (!result || typeof result !== 'object') return emptyPerformance();
@@ -118,13 +121,44 @@ export async function GET(
       );
     }
 
+    const cacheKey = ['campaign', adAccountId, campaignId];
+    const cached = cacheGet<AdAccountHierarchyCampaign>(cacheKey);
+    if (cached) {
+      return NextResponse.json({ success: true, tenantId, businessId, adAccountId, campaign: cached });
+    }
+
+    const cooldown = isCoolingDown(adAccountId);
+    if (cooldown.cooling) {
+      const stale = cacheGetStale<AdAccountHierarchyCampaign>(cacheKey);
+      if (stale) {
+        return NextResponse.json({ success: true, tenantId, businessId, adAccountId, campaign: stale, rateLimited: true, retryAfterMs: cooldown.retryAfterMs });
+      }
+      return NextResponse.json(
+        { success: false, error: `Rate limit cooldown active. Retry after ${Math.ceil(cooldown.retryAfterMs / 1000)}s.`, rateLimited: true, retryAfterMs: cooldown.retryAfterMs },
+        { status: 429 }
+      );
+    }
+
     const mcpClient = new MCPClient({
       tenantId,
       userId: context.userId,
       isPlatformAdmin: context.isPlatformAdmin,
     });
 
-    const raw: any = await mcpClient.callTool('get_campaign_by_id', { campaignId });
+    let raw: any;
+    try {
+      raw = await mcpClient.callTool('get_campaign_by_id', { campaignId, accountId: adAccountId });
+      clearCooldown(adAccountId);
+    } catch (fetchError) {
+      if (isRateLimitMessage(fetchError)) {
+        const retryAfterMs = markCooldown(adAccountId);
+        const stale = cacheGetStale<AdAccountHierarchyCampaign>(cacheKey);
+        if (stale) {
+          return NextResponse.json({ success: true, tenantId, businessId, adAccountId, campaign: stale, rateLimited: true, retryAfterMs });
+        }
+      }
+      throw fetchError;
+    }
     if (!raw || !raw.id) {
       return NextResponse.json(
         { success: false, error: 'Campaign not found.' },
@@ -135,7 +169,7 @@ export async function GET(
     const actualAccountId = normalizeAdAccountId(String(raw.accountId || ''));
     const accountMismatch = actualAccountId !== '' && actualAccountId !== adAccountId;
 
-    const performance = await getInsightsSafe(mcpClient, campaignId);
+    const performance = await getInsightsSafe(mcpClient, campaignId, adAccountId);
 
     const campaign: AdAccountHierarchyCampaign = {
       id: String(raw.id),
@@ -157,6 +191,7 @@ export async function GET(
       updatedAt: toIso(raw.updatedAt),
     };
 
+    cacheSet(cacheKey, campaign);
     return NextResponse.json({
       success: true,
       tenantId,

@@ -78,12 +78,6 @@ export function loadEnvConfig(): EnvConfig {
   const tenantSuTokenMapRaw = validateTenantTokenMapJson(
     parseOptionalToken(process.env.TENANT_SU_TOKEN_MAP)
   );
-  if (!globalSystemUserToken && !tenantSuTokenMapRaw) {
-    throw new Error(
-      'Configure at least one token source: TENANT_SU_TOKEN_MAP or GLOBAL_SYSTEM_USER_TOKEN.'
-    );
-  }
-
   const policyModeEnv = (process.env.POLICY_ENFORCEMENT_MODE || 'allow_with_warning')
     .toLowerCase()
     .trim();

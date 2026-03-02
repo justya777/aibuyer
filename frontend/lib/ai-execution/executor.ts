@@ -37,6 +37,7 @@ type RawAction = {
   arguments: Record<string, any>;
   result?: any;
   error?: string;
+  errorCategory?: string;
   success: boolean;
 };
 
@@ -330,7 +331,14 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
           }
 
           const hasExplicitBudget = toolArgs.dailyBudget != null || toolArgs.lifetimeBudget != null;
-          if (!hasExplicitBudget && retryMachine.canRetry(FixCategory.BUDGET_MISSING)) {
+          const previousBudgetError = actions.some(
+            (action) =>
+              action.tool === 'create_adset' &&
+              !action.success &&
+              (action.errorCategory === 'budget_missing' ||
+                (typeof action.error === 'string' && action.error.includes('requires explicit dailyBudget')))
+          );
+          if ((!hasExplicitBudget || previousBudgetError) && retryMachine.canRetry(FixCategory.BUDGET_MISSING)) {
             retryMachine.markApplied(FixCategory.BUDGET_MISSING);
             const campaignAction = actions.find((a) => a.tool === 'create_campaign' && a.success);
             const campaignDailyBudget = campaignAction?.result?.budget?.daily;
@@ -351,8 +359,9 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
             (action) =>
               action.tool === 'create_adset' &&
               !action.success &&
-              typeof action.error === 'string' &&
-              (action.error.includes('Bid amount required') || action.error.toLowerCase().includes('bid_amount'))
+              (action.errorCategory === 'bid_required' ||
+                (typeof action.error === 'string' &&
+                  (action.error.includes('Bid amount required') || action.error.toLowerCase().includes('bid_amount'))))
           );
           const previousAdSetAdvantageAudienceError = actions.some(
             (action) =>
@@ -457,10 +466,13 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
 
           const campaignActionForPixel = actions.find((a) => a.tool === 'create_campaign' && a.success);
           const objectiveForPixel = campaignActionForPixel?.result?.objective;
-          const needsPixel = objectiveForPixel === 'OUTCOME_LEADS' ||
+          const optimGoal = String(toolArgs.optimizationGoal || '').toUpperCase();
+          const isLeadGenOptimization = optimGoal === 'LEAD_GENERATION' || optimGoal === 'QUALITY_LEAD';
+          const needsPixel = !isLeadGenOptimization && (
             objectiveForPixel === 'OUTCOME_SALES' ||
             objectiveForPixel === 'CONVERSIONS' ||
-            toolArgs.optimizationGoal === 'OFFSITE_CONVERSIONS';
+            optimGoal === 'OFFSITE_CONVERSIONS'
+          );
           if (needsPixel) {
             let resolvedPixelId = toolArgs.promotedObject?.pixel_id || toolArgs.promotedObject?.pixelId || null;
             if (!resolvedPixelId) {
@@ -559,6 +571,25 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
             } else {
               throw new Error('Cannot create ad: No valid adset ID available. Please create adset first.');
             }
+          }
+        }
+
+        if (toolCall.function.name === 'create_ad' && !toolArgs.pixelId) {
+          try {
+            const pixelResp = await fetch(
+              `${appBaseUrl}/api/tenants/${tenantId}/businesses/${businessId}/ad-accounts/${accountId}/pixel-status`,
+              { method: 'GET', headers: internalHeaders }
+            );
+            if (pixelResp.ok) {
+              const pixelData = await pixelResp.json();
+              const defaultPixelId = pixelData.defaultPixelId || null;
+              if (defaultPixelId) {
+                toolArgs.pixelId = defaultPixelId;
+                pushFix(`Attached pixel ${defaultPixelId} for website events tracking.`);
+              }
+            }
+          } catch {
+            emitRunLog('step.update', { tool: toolCall.function.name, summary: 'Pixel status fetch failed for ad tracking' });
           }
         }
 
@@ -757,11 +788,13 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
       } catch (error) {
         toolFailureCounts[toolCall.function.name] = (toolFailureCounts[toolCall.function.name] || 0) + 1;
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        const normalizedError = normalizeExecutionError(errorMessage);
         actions.push({
           type: getActionType(toolCall.function.name),
           tool: toolCall.function.name,
           arguments: JSON.parse(toolCall.function.arguments),
           error: errorMessage,
+          errorCategory: normalizedError.category,
           success: false,
         });
         toolResults.push({
@@ -769,8 +802,6 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
           role: 'tool' as const,
           content: `Error: ${errorMessage}`,
         });
-
-        const normalizedError = normalizeExecutionError(errorMessage);
         const attemptCount = toolFailureCounts[toolCall.function.name] || 1;
         emitRunLog('step.error', {
           tool: toolCall.function.name,
@@ -799,6 +830,9 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
         const autoFixNotes = [...stepFixesApplied];
         if (normalizedError.category === 'bid_required' && !autoFixNotes.some((n) => n.includes('bid'))) {
           autoFixNotes.push('Auto-fixed: Applied fallback bid amount and retried.');
+        }
+        if (normalizedError.category === 'budget_missing' && !autoFixNotes.some((n) => n.includes('budget'))) {
+          autoFixNotes.push('Auto-fixed: Inherited budget from campaign and retried.');
         }
         if (normalizedError.category === 'advantage_audience' && !autoFixNotes.some((n) => n.includes('Advantage Audience'))) {
           autoFixNotes.push(

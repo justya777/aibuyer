@@ -43,7 +43,7 @@ import { PageResolver } from './core/page-resolution.js';
 import { PolicyEngine } from './core/policy-engine.js';
 import { normalizeAdAccountId, normalizePageId, TenantRegistry } from './core/tenant-registry.js';
 import type { RequestContext } from './core/types.js';
-import { EnvTokenProvider } from './core/token-provider.js';
+import { DbTokenProvider, EnvTokenProvider, CompositeTokenProvider } from './core/token-provider.js';
 import { InsightsApi } from './insights.js';
 import { PixelsApi, type FacebookPixel } from './pixels.js';
 import { TargetingApi } from './targeting.js';
@@ -87,10 +87,13 @@ export class FacebookServiceFacade {
     this.env = deps.env || getEnvConfig();
     this.tenantRegistry = deps.tenantRegistry || new TenantRegistry();
 
-    const tokenProvider = new EnvTokenProvider({
+    const dbProvider = new DbTokenProvider();
+    const envProvider = new EnvTokenProvider({
       tenantTokenMapRaw: this.env.tenantSuTokenMapRaw,
       globalToken: this.env.globalSystemUserToken,
     });
+    // TODO: remove env fallback once all tenants migrated to DB tokens
+    const tokenProvider = new CompositeTokenProvider([dbProvider, envProvider]);
     this.graphClient =
       deps.graphClient ||
       new GraphClient(tokenProvider, {
@@ -255,10 +258,15 @@ export class FacebookServiceFacade {
     userId?: string;
     isPlatformAdmin?: boolean;
     campaignId: string;
+    accountId?: string;
   }): Promise<FacebookCampaign> {
     const actor = await this.requireActor(params, 'get_campaign_by_id');
-    const baseCtx = this.buildContext(actor, { campaignId: params.campaignId });
-    const accountId = await this.campaignsApi.getCampaignAccountId(baseCtx, params.campaignId);
+    const accountId = params.accountId
+      ? normalizeAdAccountId(params.accountId)
+      : await this.campaignsApi.getCampaignAccountId(
+          this.buildContext(actor, { campaignId: params.campaignId }),
+          params.campaignId
+        );
     await this.tenantRegistry.assertAdAccountAllowed(
       actor.tenantId,
       accountId,
@@ -567,8 +575,12 @@ export class FacebookServiceFacade {
 
   async getAdSets(params: GetAdSetsParams): Promise<FacebookAdSet[]> {
     const actor = await this.requireActor(params, 'get_adsets');
-    const ctx = this.buildContext(actor, { campaignId: params.campaignId });
-    const accountId = await this.campaignsApi.getCampaignAccountId(ctx, params.campaignId);
+    const accountId = params.accountId
+      ? normalizeAdAccountId(params.accountId)
+      : await this.campaignsApi.getCampaignAccountId(
+          this.buildContext(actor, { campaignId: params.campaignId }),
+          params.campaignId
+        );
     await this.tenantRegistry.assertAdAccountAllowed(
       actor.tenantId,
       accountId,
@@ -589,13 +601,20 @@ export class FacebookServiceFacade {
       actor.userId,
       actor.isPlatformAdmin
     );
+
+    const campaignBudget = await this.campaignsApi.getCampaignBudget(
+      this.buildContext(actor, { adAccountId: params.accountId, campaignId: params.campaignId }),
+      params.campaignId
+    );
+    const hasCBO = campaignBudget.dailyBudget != null || campaignBudget.lifetimeBudget != null;
+
     const evaluation = this.policyEngine.evaluateMutation({
       tenantId: actor.tenantId,
       operation: 'create_adset',
-      requireExplicitBudget: true,
+      requireExplicitBudget: !hasCBO,
       nextBudget: {
-        dailyBudget: params.dailyBudget,
-        lifetimeBudget: params.lifetimeBudget,
+        dailyBudget: params.dailyBudget ?? (hasCBO ? campaignBudget.dailyBudget : undefined),
+        lifetimeBudget: params.lifetimeBudget ?? (hasCBO ? campaignBudget.lifetimeBudget : undefined),
       },
       nextStatus: params.status,
       targeting: {
@@ -607,12 +626,13 @@ export class FacebookServiceFacade {
     });
 
     try {
+      const enrichedParams = { ...params, _hasCampaignBudget: hasCBO };
       const created = await this.adSetsApi.createAdSet(
         this.buildContext(actor, {
           adAccountId: params.accountId,
           campaignId: params.campaignId,
         }),
-        params
+        enrichedParams
       );
       await this.logMutation(
         actor,
@@ -691,11 +711,14 @@ export class FacebookServiceFacade {
 
   async getAds(params: GetAdsParams): Promise<FacebookAd[]> {
     const actor = await this.requireActor(params, 'get_ads');
-    const ctx = this.buildContext(actor);
 
     if (params.adSetId) {
-      const adSetCtx = this.buildContext(actor, { adSetId: params.adSetId });
-      const accountId = await this.adSetsApi.getAdSetAccountId(adSetCtx, params.adSetId);
+      const accountId = params.accountId
+        ? normalizeAdAccountId(params.accountId)
+        : await this.adSetsApi.getAdSetAccountId(
+            this.buildContext(actor, { adSetId: params.adSetId }),
+            params.adSetId
+          );
       await this.tenantRegistry.assertAdAccountAllowed(
         actor.tenantId,
         accountId,
@@ -709,8 +732,12 @@ export class FacebookServiceFacade {
     }
 
     if (params.campaignId) {
-      const campaignCtx = this.buildContext(actor, { campaignId: params.campaignId });
-      const accountId = await this.campaignsApi.getCampaignAccountId(campaignCtx, params.campaignId);
+      const accountId = params.accountId
+        ? normalizeAdAccountId(params.accountId)
+        : await this.campaignsApi.getCampaignAccountId(
+            this.buildContext(actor, { campaignId: params.campaignId }),
+            params.campaignId
+          );
       await this.tenantRegistry.assertAdAccountAllowed(
         actor.tenantId,
         accountId,
@@ -975,21 +1002,26 @@ export class FacebookServiceFacade {
     actor: ActorContext,
     params: GetInsightsParams
   ): Promise<RequestContext> {
-    if (params.accountId) {
+    const knownAccount = params.accountId
+      ? normalizeAdAccountId(params.accountId)
+      : undefined;
+
+    if (knownAccount && !params.campaignId && !params.adSetId && !params.adId) {
       await this.tenantRegistry.assertAdAccountAllowed(
         actor.tenantId,
-        params.accountId,
+        knownAccount,
         actor.userId,
         actor.isPlatformAdmin
       );
-      return this.buildContext(actor, { adAccountId: params.accountId });
+      return this.buildContext(actor, { adAccountId: knownAccount });
     }
 
-    const baseCtx = this.buildContext(actor);
-
     if (params.campaignId) {
-      const campaignCtx = this.buildContext(actor, { campaignId: params.campaignId });
-      const accountId = await this.campaignsApi.getCampaignAccountId(campaignCtx, params.campaignId);
+      const accountId = knownAccount
+        ?? await this.campaignsApi.getCampaignAccountId(
+          this.buildContext(actor, { campaignId: params.campaignId }),
+          params.campaignId
+        );
       await this.tenantRegistry.assertAdAccountAllowed(
         actor.tenantId,
         accountId,
@@ -999,8 +1031,11 @@ export class FacebookServiceFacade {
       return this.buildContext(actor, { adAccountId: accountId, campaignId: params.campaignId });
     }
     if (params.adSetId) {
-      const adSetCtx = this.buildContext(actor, { adSetId: params.adSetId });
-      const accountId = await this.adSetsApi.getAdSetAccountId(adSetCtx, params.adSetId);
+      const accountId = knownAccount
+        ?? await this.adSetsApi.getAdSetAccountId(
+          this.buildContext(actor, { adSetId: params.adSetId }),
+          params.adSetId
+        );
       await this.tenantRegistry.assertAdAccountAllowed(
         actor.tenantId,
         accountId,
@@ -1010,8 +1045,11 @@ export class FacebookServiceFacade {
       return this.buildContext(actor, { adAccountId: accountId, adSetId: params.adSetId });
     }
     if (params.adId) {
-      const adCtx = this.buildContext(actor, { adId: params.adId });
-      const accountId = await this.adsApi.getAdAccountId(adCtx, params.adId);
+      const accountId = knownAccount
+        ?? await this.adsApi.getAdAccountId(
+          this.buildContext(actor, { adId: params.adId }),
+          params.adId
+        );
       await this.tenantRegistry.assertAdAccountAllowed(
         actor.tenantId,
         accountId,
@@ -1020,7 +1058,18 @@ export class FacebookServiceFacade {
       );
       return this.buildContext(actor, { adAccountId: accountId, adId: params.adId });
     }
-    return baseCtx;
+
+    if (knownAccount) {
+      await this.tenantRegistry.assertAdAccountAllowed(
+        actor.tenantId,
+        knownAccount,
+        actor.userId,
+        actor.isPlatformAdmin
+      );
+      return this.buildContext(actor, { adAccountId: knownAccount });
+    }
+
+    return this.buildContext(actor);
   }
 
   private buildContext(

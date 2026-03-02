@@ -52,8 +52,11 @@ export class RateLimitCooldownError extends GraphApiError {
   }
 }
 
-const DEFAULT_COOLDOWN_MS = 60_000;
+const DEFAULT_COOLDOWN_MS = 15_000;
 const accountCooldowns = new Map<string, number>();
+
+const RESOURCE_CACHE_TTL_MS = 5 * 60 * 1000;
+const resourceAccountCache = new Map<string, { accountId: string; expiresAt: number }>();
 
 interface GraphClientOptions {
   apiVersion: string;
@@ -111,7 +114,7 @@ function isRateLimitErrorBody(data: unknown): boolean {
   const subcode = typeof error.error_subcode === 'number' ? error.error_subcode : undefined;
   const message = typeof error.message === 'string' ? error.message.toLowerCase() : '';
   if (code === 4 || code === 17 || code === 32) return true;
-  if (subcode === 2446079) return true;
+  if (subcode === 2446079 || subcode === 2446879) return true;
   if (message.includes('too many calls') || message.includes('too many api calls') || message.includes('user request limit reached')) return true;
   return false;
 }
@@ -169,7 +172,14 @@ export class GraphClient {
     const accountKey = ctx.adAccountId || 'global';
     const cooldownUntil = accountCooldowns.get(accountKey);
     if (cooldownUntil && Date.now() < cooldownUntil) {
-      throw new RateLimitCooldownError(accountKey, new Date(cooldownUntil));
+      const remainingMs = cooldownUntil - Date.now();
+      if (remainingMs <= 15_000) {
+        logger.info(`[COOLDOWN] Waiting ${remainingMs}ms for account ${accountKey}`);
+        await this.sleepFn(remainingMs);
+        accountCooldowns.delete(accountKey);
+      } else {
+        throw new RateLimitCooldownError(accountKey, new Date(cooldownUntil));
+      }
     }
 
     const url = `${this.baseUrl}/${this.apiVersion}/${normalizePath(request.path)}`;
@@ -206,6 +216,7 @@ export class GraphClient {
         }
 
         if (response.status >= 200 && response.status < 300) {
+          accountCooldowns.delete(accountKey);
           return {
             data: response.data,
             status: response.status,
@@ -301,35 +312,48 @@ export class GraphClient {
 
     const accountIds = new Set<string>();
     const pageIds = new Set<string>();
-    const campaignIds = new Set<string>();
-    const adSetIds = new Set<string>();
-    const adIds = new Set<string>();
 
     if (ctx.adAccountId) accountIds.add(normalizeAdAccountId(ctx.adAccountId));
     if (ctx.pageId) pageIds.add(normalizePageId(ctx.pageId));
-    if (ctx.campaignId) campaignIds.add(ctx.campaignId);
-    if (ctx.adSetId) adSetIds.add(ctx.adSetId);
-    if (ctx.adId) adIds.add(ctx.adId);
 
     const pathHead = normalizePath(request.path).split('/')[0];
     if (pathHead.startsWith('act_')) {
       accountIds.add(normalizeAdAccountId(pathHead));
     }
 
-    this.collectIdsFromUnknown(request.query, accountIds, pageIds, campaignIds, adSetIds, adIds);
-    this.collectIdsFromUnknown(request.body, accountIds, pageIds, campaignIds, adSetIds, adIds);
+    // When adAccountId is already in context, the account-level tenant check
+    // is sufficient — no need to resolve campaign/adset/ad → account_id
+    // (those entities live under the account, and Meta validates ownership).
+    if (!ctx.adAccountId) {
+      const campaignIds = new Set<string>();
+      const adSetIds = new Set<string>();
+      const adIds = new Set<string>();
 
-    for (const campaignId of campaignIds) {
-      const accountId = await this.resolveAccountIdForResource(ctx, campaignId);
-      accountIds.add(accountId);
-    }
-    for (const adSetId of adSetIds) {
-      const accountId = await this.resolveAccountIdForResource(ctx, adSetId);
-      accountIds.add(accountId);
-    }
-    for (const adId of adIds) {
-      const accountId = await this.resolveAccountIdForResource(ctx, adId);
-      accountIds.add(accountId);
+      if (ctx.campaignId) campaignIds.add(ctx.campaignId);
+      if (ctx.adSetId) adSetIds.add(ctx.adSetId);
+      if (ctx.adId) adIds.add(ctx.adId);
+
+      this.collectIdsFromUnknown(request.query, accountIds, pageIds, campaignIds, adSetIds, adIds);
+      this.collectIdsFromUnknown(request.body, accountIds, pageIds, campaignIds, adSetIds, adIds);
+
+      for (const campaignId of campaignIds) {
+        const accountId = await this.resolveAccountIdForResource(ctx, campaignId);
+        accountIds.add(accountId);
+      }
+      for (const adSetId of adSetIds) {
+        const accountId = await this.resolveAccountIdForResource(ctx, adSetId);
+        accountIds.add(accountId);
+      }
+      for (const adId of adIds) {
+        const accountId = await this.resolveAccountIdForResource(ctx, adId);
+        accountIds.add(accountId);
+      }
+    } else {
+      const dummyCampaigns = new Set<string>();
+      const dummyAdSets = new Set<string>();
+      const dummyAds = new Set<string>();
+      this.collectIdsFromUnknown(request.query, accountIds, pageIds, dummyCampaigns, dummyAdSets, dummyAds);
+      this.collectIdsFromUnknown(request.body, accountIds, pageIds, dummyCampaigns, dummyAdSets, dummyAds);
     }
 
     for (const accountId of accountIds) {
@@ -413,6 +437,11 @@ export class GraphClient {
   }
 
   private async resolveAccountIdForResource(ctx: RequestContext, resourceId: string): Promise<string> {
+    const cached = resourceAccountCache.get(resourceId);
+    if (cached && Date.now() < cached.expiresAt) {
+      return cached.accountId;
+    }
+
     const token = await this.tokenProvider.getToken(ctx);
     const url = `${this.baseUrl}/${this.apiVersion}/${normalizePath(resourceId)}`;
     const response = await this.httpClient.request<Record<string, unknown>>({
@@ -428,6 +457,11 @@ export class GraphClient {
       throw new TenantIsolationError(`Could not resolve account_id for resource ${resourceId}`);
     }
 
-    return normalizeAdAccountId(accountId);
+    const normalized = normalizeAdAccountId(accountId);
+    resourceAccountCache.set(resourceId, {
+      accountId: normalized,
+      expiresAt: Date.now() + RESOURCE_CACHE_TTL_MS,
+    });
+    return normalized;
   }
 }

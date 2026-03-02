@@ -1,11 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { db } from '@/lib/db';
+import { encryptToken } from '@/lib/security/token-encryption';
 import { AuthRequiredError, TenantAccessError, resolveTenantContext } from '@/lib/tenant-context';
 
+const GRAPH_API_BASE = 'https://graph.facebook.com';
+
 const CreateBusinessSchema = z.object({
-  businessId: z.string().min(1),
+  businessId: z.string().min(1).regex(/^\d+$/, 'Business ID must be numeric.'),
   label: z.string().optional(),
+  accessToken: z.string().min(10, 'Access token is required.'),
 });
 
 async function assertTenantAdmin(userId: string, tenantId: string, isPlatformAdmin: boolean): Promise<void> {
@@ -19,12 +23,30 @@ async function assertTenantAdmin(userId: string, tenantId: string, isPlatformAdm
   }
 }
 
+class TokenValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'TokenValidationError';
+  }
+}
+
+async function validateMetaToken(accessToken: string): Promise<void> {
+  const res = await fetch(`${GRAPH_API_BASE}/me?access_token=${encodeURIComponent(accessToken)}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new TokenValidationError(body?.error?.message || 'Invalid Meta access token.');
+  }
+}
+
 function handleError(error: unknown): NextResponse {
   if (error instanceof z.ZodError) {
     return NextResponse.json(
       { success: false, error: 'Invalid payload.', details: error.flatten() },
       { status: 400 }
     );
+  }
+  if (error instanceof TokenValidationError) {
+    return NextResponse.json({ success: false, error: error.message }, { status: 400 });
   }
   if (error instanceof AuthRequiredError) {
     return NextResponse.json({ success: false, error: error.message }, { status: 401 });
@@ -70,6 +92,7 @@ export async function GET(
         tenantId,
         businessId: tenant.businessId,
         label: null,
+        isActive: true,
         lastSyncAt: null,
         deletedAt: null,
         deletedBy: null,
@@ -77,6 +100,12 @@ export async function GET(
         updatedAt: new Date(0),
       });
     }
+
+    const credentials = await db.metaCredential.findMany({
+      where: { tenantId, revokedAt: null },
+      select: { businessId: true, tokenLast4: true, lastValidatedAt: true },
+    });
+    const credMap = new Map(credentials.map((c) => [c.businessId, c]));
 
     const summaries = await Promise.all(
       mergedBusinesses.map(async (business) => {
@@ -89,12 +118,15 @@ export async function GET(
           }),
         ]);
 
+        const cred = credMap.get(business.businessId);
         return {
           tenantId,
           businessId: business.businessId,
           label: business.label,
           lastSyncAt: business.lastSyncAt,
           createdAt: business.createdAt,
+          tokenLast4: cred?.tokenLast4 ?? null,
+          tokenConnected: !!cred,
           counts: {
             adAccounts: adAccountsCount,
             pages: pagesCount,
@@ -128,32 +160,46 @@ export async function POST(
     const payload = CreateBusinessSchema.parse(await request.json());
     const businessId = payload.businessId.trim();
     const label = payload.label?.trim() || null;
+    const { accessToken } = payload;
 
-    const business = await db.businessPortfolio.upsert({
-      where: {
-        tenantId_businessId: {
-          tenantId,
-          businessId,
-        },
-      },
-      update: { label },
-      create: {
-        tenantId,
-        businessId,
-        label,
-      },
-    });
+    await validateMetaToken(accessToken);
+
+    const tokenLast4 = accessToken.slice(-4);
+    const tokenEncrypted = encryptToken(accessToken);
 
     const tenant = await db.tenant.findUnique({
       where: { id: tenantId },
       select: { businessId: true },
     });
-    if (!tenant?.businessId) {
-      await db.tenant.update({
-        where: { id: tenantId },
-        data: { businessId },
-      });
-    }
+
+    const [business] = await db.$transaction([
+      db.businessPortfolio.upsert({
+        where: { tenantId_businessId: { tenantId, businessId } },
+        update: { label, isActive: true, deletedAt: null, deletedBy: null },
+        create: { tenantId, businessId, label, isActive: true },
+      }),
+      db.metaCredential.upsert({
+        where: { tenantId_businessId: { tenantId, businessId } },
+        update: {
+          tokenEncrypted,
+          tokenLast4,
+          revokedAt: null,
+          lastValidatedAt: new Date(),
+          createdByUserId: context.userId,
+        },
+        create: {
+          tenantId,
+          businessId,
+          tokenEncrypted,
+          tokenLast4,
+          lastValidatedAt: new Date(),
+          createdByUserId: context.userId,
+        },
+      }),
+      ...(tenant && !tenant.businessId
+        ? [db.tenant.update({ where: { id: tenantId }, data: { businessId } })]
+        : []),
+    ]);
 
     return NextResponse.json({
       success: true,
@@ -164,6 +210,7 @@ export async function POST(
         label: business.label,
         lastSyncAt: business.lastSyncAt,
         createdAt: business.createdAt,
+        tokenLast4,
       },
     });
   } catch (error) {

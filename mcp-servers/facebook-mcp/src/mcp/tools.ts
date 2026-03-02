@@ -68,6 +68,7 @@ export const GetCampaignByIdSchema = z.object({
   tenantId: tenantIdRequired,
   ...actorFields,
   campaignId: z.string(),
+  accountId: z.string().optional(),
 });
 
 export const CreateCampaignSchema = z.object({
@@ -141,6 +142,7 @@ export const GetAdSetsSchema = z.object({
   tenantId: tenantIdRequired,
   ...actorFields,
   campaignId: z.string(),
+  accountId: z.string().optional(),
   limit: z.number().optional().default(50),
   status: coerceStringArray,
 });
@@ -206,6 +208,7 @@ export const GetAdsSchema = z.object({
   ...actorFields,
   adSetId: z.string().optional(),
   campaignId: z.string().optional(),
+  accountId: z.string().optional(),
   limit: z.number().optional().default(50),
   status: coerceStringArray,
 });
@@ -217,6 +220,7 @@ export const CreateAdSchema = z.object({
   adSetId: z.string(),
   name: z.string(),
   status: z.string().optional().default('PAUSED'),
+  pixelId: z.string().optional(),
   creative: z.object({
     pageId: z.string().optional(),
     title: z.string().optional(),
@@ -598,6 +602,7 @@ export const tools: Tool[] = [
         adSetId: { type: 'string' },
         name: { type: 'string' },
         status: { type: 'string', default: 'PAUSED' },
+        pixelId: { type: 'string', description: 'Pixel ID for website events tracking' },
         creative: { type: 'object' },
       },
       required: ['tenantId', 'accountId', 'adSetId', 'name', 'creative'],

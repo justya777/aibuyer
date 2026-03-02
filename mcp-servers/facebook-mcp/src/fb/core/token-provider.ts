@@ -1,8 +1,47 @@
 import type { RequestContext } from './types.js';
+import { prisma } from '../../db/prisma.js';
+import { decryptToken } from '../../security/token-encryption.js';
 
 export interface TokenProvider {
   getToken(ctx: RequestContext): Promise<string>;
 }
+
+// ---------------------------------------------------------------------------
+// DB-backed token provider (primary)
+// ---------------------------------------------------------------------------
+
+export class TenantNotConnectedError extends Error {
+  readonly code = 'TENANT_NOT_CONNECTED';
+  readonly http = 422;
+
+  constructor(tenantId: string) {
+    super('Tenant has not connected a Meta Business Portfolio.');
+    this.name = 'TenantNotConnectedError';
+  }
+}
+
+export class DbTokenProvider implements TokenProvider {
+  async getToken(ctx: RequestContext): Promise<string> {
+    const credential = await prisma.metaCredential.findFirst({
+      where: {
+        tenantId: ctx.tenantId,
+        revokedAt: null,
+      },
+      orderBy: { createdAt: 'desc' },
+      select: { tokenEncrypted: true },
+    });
+
+    if (!credential) {
+      throw new TenantNotConnectedError(ctx.tenantId);
+    }
+
+    return decryptToken(credential.tokenEncrypted);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ENV-based token provider (legacy fallback)
+// ---------------------------------------------------------------------------
 
 interface EnvTokenProviderOptions {
   tenantTokenMapRaw?: string;
@@ -42,5 +81,29 @@ export class EnvTokenProvider implements TokenProvider {
     throw new Error(
       `No Meta system user token configured for tenant ${ctx.tenantId}. Set TENANT_SU_TOKEN_MAP or GLOBAL_SYSTEM_USER_TOKEN.`
     );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Composite provider: DB first, then env fallback
+// ---------------------------------------------------------------------------
+
+export class CompositeTokenProvider implements TokenProvider {
+  private readonly providers: TokenProvider[];
+
+  constructor(providers: TokenProvider[]) {
+    this.providers = providers;
+  }
+
+  async getToken(ctx: RequestContext): Promise<string> {
+    let lastError: unknown;
+    for (const provider of this.providers) {
+      try {
+        return await provider.getToken(ctx);
+      } catch (err) {
+        lastError = err;
+      }
+    }
+    throw lastError;
   }
 }

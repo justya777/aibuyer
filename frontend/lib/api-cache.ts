@@ -141,7 +141,9 @@ export function isRateLimitMessage(error: unknown): boolean {
     lower.includes('code=17') ||
     lower.includes('code=32') ||
     lower.includes('subcode=2446079') ||
-    lower.includes('2446079')
+    lower.includes('subcode=2446879') ||
+    lower.includes('2446079') ||
+    lower.includes('2446879')
   );
 }
 

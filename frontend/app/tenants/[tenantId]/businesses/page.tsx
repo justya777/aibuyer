@@ -10,6 +10,8 @@ type BusinessSummary = {
   label: string | null;
   lastSyncAt: string | null;
   createdAt: string;
+  tokenLast4: string | null;
+  tokenConnected: boolean;
   counts: {
     adAccounts: number;
     pages: number;
@@ -26,6 +28,7 @@ export default function TenantBusinessesPage() {
   const [error, setError] = useState<string | null>(null);
   const [businessIdInput, setBusinessIdInput] = useState('');
   const [labelInput, setLabelInput] = useState('');
+  const [accessTokenInput, setAccessTokenInput] = useState('');
 
   const loadBusinesses = useCallback(async () => {
     if (!tenantId) return;
@@ -66,6 +69,7 @@ export default function TenantBusinessesPage() {
         body: JSON.stringify({
           businessId: businessIdInput.trim(),
           label: labelInput.trim() || undefined,
+          accessToken: accessTokenInput.trim(),
         }),
       });
       const payload = await response.json();
@@ -75,6 +79,7 @@ export default function TenantBusinessesPage() {
       window.localStorage.setItem(`selectedBusinessId:${tenantId}`, payload.business.businessId);
       setBusinessIdInput('');
       setLabelInput('');
+      setAccessTokenInput('');
       await loadBusinesses();
     } catch (addError) {
       setError(addError instanceof Error ? addError.message : 'Failed to add Business Portfolio.');
@@ -118,31 +123,43 @@ export default function TenantBusinessesPage() {
     <main className="p-6 space-y-6">
       <section className="bg-white border border-gray-200 rounded-lg p-4">
         <h2 className="text-lg font-semibold text-gray-900 mb-3">Add Business Portfolio</h2>
-        <form className="grid grid-cols-1 md:grid-cols-3 gap-3" onSubmit={handleAddBusiness}>
+        <form className="space-y-3" onSubmit={handleAddBusiness}>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <input
+              className="border border-gray-300 rounded-md px-3 py-2 text-sm"
+              placeholder="Business Portfolio ID (required)"
+              value={businessIdInput}
+              onChange={(event) => setBusinessIdInput(event.target.value)}
+              required
+            />
+            <input
+              className="border border-gray-300 rounded-md px-3 py-2 text-sm"
+              placeholder="Label / Name (optional)"
+              value={labelInput}
+              onChange={(event) => setLabelInput(event.target.value)}
+            />
+          </div>
           <input
-            className="border border-gray-300 rounded-md px-3 py-2 text-sm"
-            placeholder="Business ID (required)"
-            value={businessIdInput}
-            onChange={(event) => setBusinessIdInput(event.target.value)}
+            type="password"
+            className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm font-mono"
+            placeholder="System User Access Token (required)"
+            value={accessTokenInput}
+            onChange={(event) => setAccessTokenInput(event.target.value)}
             required
           />
-          <input
-            className="border border-gray-300 rounded-md px-3 py-2 text-sm"
-            placeholder="Label / Name (optional)"
-            value={labelInput}
-            onChange={(event) => setLabelInput(event.target.value)}
-          />
-          <button
-            type="submit"
-            disabled={isAdding}
-            className="px-3 py-2 bg-facebook-600 text-white rounded-md text-sm hover:bg-facebook-700 disabled:opacity-60"
-          >
-            {isAdding ? 'Saving...' : 'Add Business Portfolio'}
-          </button>
+          <div className="flex items-center gap-3">
+            <button
+              type="submit"
+              disabled={isAdding}
+              className="px-4 py-2 bg-facebook-600 text-white rounded-md text-sm hover:bg-facebook-700 disabled:opacity-60"
+            >
+              {isAdding ? 'Connecting...' : 'Add Business Portfolio'}
+            </button>
+            <p className="text-xs text-gray-500">
+              Token is validated against Meta API, encrypted at rest, and never displayed after saving.
+            </p>
+          </div>
         </form>
-        <p className="text-xs text-gray-500 mt-2">
-          After adding a BP, run sync to discover ad accounts and pages automatically.
-        </p>
       </section>
 
       {error ? <p className="text-sm text-red-600">{error}</p> : null}
@@ -158,6 +175,7 @@ export default function TenantBusinessesPage() {
             <thead>
               <tr className="text-left border-b border-gray-200">
                 <th className="py-2 pr-4">Business</th>
+                <th className="py-2 pr-4">Token</th>
                 <th className="py-2 pr-4">Last Sync</th>
                 <th className="py-2 pr-4">Ad Accounts</th>
                 <th className="py-2 pr-4">Pages</th>
@@ -170,6 +188,16 @@ export default function TenantBusinessesPage() {
                   <td className="py-2 pr-4">
                     <p className="font-medium text-gray-900">{business.label || business.businessId}</p>
                     <p className="text-xs text-gray-500">{business.businessId}</p>
+                  </td>
+                  <td className="py-2 pr-4">
+                    {business.tokenConnected ? (
+                      <span className="inline-flex items-center gap-1 text-green-700">
+                        <span className="inline-block w-2 h-2 rounded-full bg-green-500" />
+                        ****{business.tokenLast4}
+                      </span>
+                    ) : (
+                      <span className="text-gray-400">No token</span>
+                    )}
                   </td>
                   <td className="py-2 pr-4">
                     {business.lastSyncAt ? new Date(business.lastSyncAt).toLocaleString() : 'Not synced yet'}

@@ -230,6 +230,7 @@ export interface GetInsightsParams extends TenantScoped {
 
 export interface GetAdSetsParams extends TenantScoped {
   campaignId: string;
+  accountId?: string;
   limit?: number;
   status?: string[];
 }
@@ -249,6 +250,7 @@ export interface CreateAdSetParams extends TenantRequired {
   dailyBudget?: number | null;
   lifetimeBudget?: number | null;
   bidAmount?: number;
+  _hasCampaignBudget?: boolean;
   targeting?: {
     geoLocations?: {
       countries?: string[];
@@ -281,6 +283,7 @@ export interface UpdateAdSetParams extends TenantRequired {
 export interface GetAdsParams extends TenantScoped {
   adSetId?: string;
   campaignId?: string;
+  accountId?: string;
   limit?: number;
   status?: string[];
 }
@@ -290,6 +293,7 @@ export interface CreateAdParams extends TenantRequired {
   adSetId: string;
   name: string;
   status?: string;
+  pixelId?: string;
   creative: {
     pageId?: string;
     title?: string;

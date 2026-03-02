@@ -46,12 +46,14 @@ function emptyPerformance(): EntityPerformance {
 
 async function getInsightsSafe(
   mcpClient: MCPClient,
-  adSetId: string
+  adSetId: string,
+  accountId?: string
 ): Promise<EntityPerformance> {
   try {
     const result = await mcpClient.callTool('get_insights', {
       level: 'adset',
       adSetId,
+      accountId,
       datePreset: 'last_7d',
     });
     if (!result || typeof result !== 'object') return emptyPerformance();
@@ -184,6 +186,7 @@ export async function GET(
     try {
       rawAdSets = await mcpClient.callTool('get_adsets', {
         campaignId,
+        accountId: adAccountId,
         limit: 50,
         status: ['ACTIVE', 'PAUSED', 'ADSET_PAUSED', 'IN_PROCESS', 'WITH_ISSUES', 'PENDING_REVIEW', 'DISAPPROVED', 'PREAPPROVED'],
       });
@@ -217,7 +220,7 @@ export async function GET(
           },
           targeting,
           targetingSummary: buildTargetingSummary(targeting),
-          performance: adSetId ? await getInsightsSafe(mcpClient, adSetId) : emptyPerformance(),
+          performance: adSetId ? await getInsightsSafe(mcpClient, adSetId, adAccountId) : emptyPerformance(),
           ads: [],
           createdAt: toIso(adSet?.createdAt),
           updatedAt: toIso(adSet?.updatedAt),

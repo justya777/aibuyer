@@ -20,7 +20,7 @@ const DEFAULT_MAX_ATTEMPTS: Record<FixCategory, number> = {
   [FixCategory.LOCALE_MISMATCH]: 1,
   [FixCategory.CREATIVE_URL]: 2,
   [FixCategory.CAMPAIGN_ID_PLACEHOLDER]: 1,
-  [FixCategory.BUDGET_MISSING]: 1,
+  [FixCategory.BUDGET_MISSING]: 3,
   [FixCategory.RATE_LIMIT]: 3,
 };
 

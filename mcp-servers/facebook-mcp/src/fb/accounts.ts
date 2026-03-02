@@ -406,14 +406,25 @@ export class AccountsApi {
   }
 
   async syncTenantAssets(ctx: RequestContext, businessIdOverride?: string): Promise<SyncTenantAssetsResult> {
-    const tenant = await prisma.tenant.findUnique({
-      where: { id: ctx.tenantId },
-      select: { businessId: true },
-    });
-    const businessId = businessIdOverride?.trim() || tenant?.businessId?.trim();
+    let businessId = businessIdOverride?.trim();
+    if (!businessId) {
+      const tenant = await prisma.tenant.findUnique({
+        where: { id: ctx.tenantId },
+        select: { businessId: true },
+      });
+      businessId = tenant?.businessId?.trim();
+    }
+    if (!businessId) {
+      const activePortfolio = await prisma.businessPortfolio.findFirst({
+        where: { tenantId: ctx.tenantId, isActive: true, deletedAt: null },
+        orderBy: { createdAt: 'asc' },
+        select: { businessId: true },
+      });
+      businessId = activePortfolio?.businessId;
+    }
     if (!businessId) {
       throw new Error(
-        `Tenant ${ctx.tenantId} does not have a businessId configured. Set tenant.businessId before sync.`
+        `Tenant ${ctx.tenantId} does not have a businessId configured. Connect a Meta Business Portfolio first.`
       );
     }
 

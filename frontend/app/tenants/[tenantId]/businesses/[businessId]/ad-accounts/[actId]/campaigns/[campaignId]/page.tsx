@@ -68,9 +68,18 @@ export default function CampaignDetailPage() {
           setCampaignNotFound(true);
           return;
         }
+        if (payload.rateLimited) {
+          setRateLimited({ section: 'campaign', retryAfterMs: Number(payload.retryAfterMs) || 15000 });
+          return;
+        }
         throw new Error(
           typeof payload.error === 'string' ? payload.error : 'Failed to load campaign.'
         );
+      }
+      if (payload.rateLimited) {
+        setRateLimited({ section: 'campaign', retryAfterMs: Number(payload.retryAfterMs) || 15000 });
+      } else {
+        setRateLimited((prev) => prev?.section === 'campaign' ? null : prev);
       }
       const loaded = payload.campaign as AdAccountHierarchyCampaign | undefined;
       if (!loaded) {
@@ -82,7 +91,14 @@ export default function CampaignDetailPage() {
         setAccountMismatch({ actualAccountId: payload.actualAccountId as string });
       }
     } catch (err) {
-      setCampaignError(err instanceof Error ? err.message : 'Failed to load campaign.');
+      const msg = err instanceof Error ? err.message : 'Failed to load campaign.';
+      const retryMatch = msg.match(/Retry after (\d+)s/);
+      if (retryMatch || msg.includes('Rate limit') || msg.includes('rate limit') || msg.includes('code=17') || msg.includes('too many calls')) {
+        const retryMs = retryMatch ? parseInt(retryMatch[1], 10) * 1000 : 15000;
+        setRateLimited({ section: 'campaign', retryAfterMs: retryMs });
+      } else {
+        setCampaignError(msg);
+      }
     } finally {
       setIsCampaignLoading(false);
     }
@@ -122,7 +138,14 @@ export default function CampaignDetailPage() {
         null;
       setSelectedAdSetId(initialSelected);
     } catch (err) {
-      setAdSetsError(err instanceof Error ? err.message : 'Failed to load ad sets.');
+      const msg = err instanceof Error ? err.message : 'Failed to load ad sets.';
+      const retryMatch = msg.match(/Retry after (\d+)s/);
+      if (retryMatch || msg.includes('Rate limit') || msg.includes('rate limit') || msg.includes('code=17') || msg.includes('too many calls')) {
+        const retryMs = retryMatch ? parseInt(retryMatch[1], 10) * 1000 : 15000;
+        setRateLimited({ section: 'adsets', retryAfterMs: retryMs });
+      } else {
+        setAdSetsError(msg);
+      }
     } finally {
       setIsAdSetsLoading(false);
     }
@@ -158,8 +181,15 @@ export default function CampaignDetailPage() {
       }
       setAds(Array.isArray(payload.ads) ? (payload.ads as AdAccountHierarchyAd[]) : []);
     } catch (err) {
-      setAdsError(err instanceof Error ? err.message : 'Failed to load ads.');
-      setAds([]);
+      const msg = err instanceof Error ? err.message : 'Failed to load ads.';
+      const retryMatch = msg.match(/Retry after (\d+)s/);
+      if (retryMatch || msg.includes('Rate limit') || msg.includes('rate limit') || msg.includes('code=17') || msg.includes('too many calls')) {
+        const retryMs = retryMatch ? parseInt(retryMatch[1], 10) * 1000 : 15000;
+        setRateLimited({ section: 'ads', retryAfterMs: retryMs });
+      } else {
+        setAdsError(msg);
+        setAds([]);
+      }
     } finally {
       setIsAdsLoading(false);
     }

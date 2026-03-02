@@ -75,6 +75,7 @@ model Tenant {
   adAccountSettings  AdAccountSettings[]
   auditLogs          AuditLog[]
   activeUsers        User[]              @relation("ActiveTenant")
+  metaCredentials    MetaCredential[]
 }
 
 model BusinessPortfolio {
@@ -82,6 +83,7 @@ model BusinessPortfolio {
   tenantId   String
   businessId String
   label      String?
+  isActive   Boolean   @default(true)
   lastSyncAt DateTime?
   deletedAt  DateTime?
   deletedBy  String?
@@ -280,4 +282,23 @@ model AiRunEvent {
 
   @@index([runId, ts])
   @@index([type, ts])
+}
+
+model MetaCredential {
+  id              String    @id @default(cuid())
+  tenantId        String
+  businessId      String
+  systemUserId    String?
+  tokenEncrypted  String
+  tokenLast4      String
+  scopesJson      String?
+  createdByUserId String?
+  revokedAt       DateTime?
+  lastValidatedAt DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@unique([tenantId, businessId])
 }

@@ -225,6 +225,13 @@ export class AdSetsApi {
         page_id: resolvedPageId,
       };
     }
+
+    const optGoal = String(params.optimizationGoal || '').toUpperCase();
+    if (promotedObject && (optGoal === 'LEAD_GENERATION' || optGoal === 'QUALITY_LEAD')) {
+      delete promotedObject.pixel_id;
+      delete promotedObject.custom_event_type;
+    }
+
     if (promotedObject) {
       payload.promoted_object = promotedObject;
     }
@@ -233,19 +240,24 @@ export class AdSetsApi {
     if (params.lifetimeBudget != null) payload.lifetime_budget = params.lifetimeBudget;
     if (params.bidAmount != null) payload.bid_amount = params.bidAmount;
 
-    // Meta rejects requests that set both campaign-level and ad set-level budgets.
-    // Keep validation at policy layer, but remove ad set budget at Graph layer when campaign budget exists.
-    const campaignBudgetResponse = await this.graphClient.request<Record<string, unknown>>(ctx, {
-      method: 'GET',
-      path: params.campaignId,
-      query: { fields: 'daily_budget,lifetime_budget' },
-    });
-    const hasCampaignBudget =
-      campaignBudgetResponse.data.daily_budget != null ||
-      campaignBudgetResponse.data.lifetime_budget != null;
-    if (hasCampaignBudget) {
-      delete payload.daily_budget;
-      delete payload.lifetime_budget;
+    if (params._hasCampaignBudget !== undefined) {
+      if (params._hasCampaignBudget) {
+        delete payload.daily_budget;
+        delete payload.lifetime_budget;
+      }
+    } else {
+      const campaignBudgetResponse = await this.graphClient.request<Record<string, unknown>>(ctx, {
+        method: 'GET',
+        path: params.campaignId,
+        query: { fields: 'daily_budget,lifetime_budget' },
+      });
+      const hasCampaignBudget =
+        campaignBudgetResponse.data.daily_budget != null ||
+        campaignBudgetResponse.data.lifetime_budget != null;
+      if (hasCampaignBudget) {
+        delete payload.daily_budget;
+        delete payload.lifetime_budget;
+      }
     }
 
     const targeting = await this.targetingApi.buildAdSetTargeting(ctx, params.targeting);

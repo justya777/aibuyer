@@ -46,12 +46,14 @@ function emptyPerformance(): EntityPerformance {
 
 async function getInsightsSafe(
   mcpClient: MCPClient,
-  adId: string
+  adId: string,
+  accountId?: string
 ): Promise<EntityPerformance> {
   try {
     const result = await mcpClient.callTool('get_insights', {
       level: 'ad',
       adId,
+      accountId,
       datePreset: 'last_7d',
     });
     if (!result || typeof result !== 'object') return emptyPerformance();
@@ -125,6 +127,7 @@ export async function GET(
     try {
       rawAds = await mcpClient.callTool('get_ads', {
         adSetId,
+        accountId: adAccountId,
         limit: 50,
         status: ['ACTIVE', 'PAUSED', 'ADSET_PAUSED', 'WITH_ISSUES', 'PENDING_REVIEW', 'IN_PROCESS', 'DISAPPROVED', 'PREAPPROVED'],
       });
@@ -154,7 +157,7 @@ export async function GET(
             videoUrl: typeof ad?.creative?.videoUrl === 'string' ? ad.creative.videoUrl : undefined,
             linkUrl: typeof ad?.creative?.linkUrl === 'string' ? ad.creative.linkUrl : undefined,
           },
-          performance: adId ? await getInsightsSafe(mcpClient, adId) : emptyPerformance(),
+          performance: adId ? await getInsightsSafe(mcpClient, adId, adAccountId) : emptyPerformance(),
           createdAt: toIso(ad?.createdAt),
           updatedAt: toIso(ad?.updatedAt),
         };

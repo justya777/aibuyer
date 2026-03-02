@@ -3,6 +3,7 @@ export type NormalizedErrorCategory =
   | 'default_page'
   | 'dsa'
   | 'bid_required'
+  | 'budget_missing'
   | 'advantage_audience'
   | 'permissions'
   | 'invalid_parameter'
@@ -109,7 +110,24 @@ export function normalizeExecutionError(error: unknown): NormalizedExecutionErro
     };
   }
 
-  if (normalized.includes('bid amount required')) {
+  if (normalized.includes('requires explicit dailybudget or lifetimebudget')) {
+    return {
+      category: 'budget_missing',
+      blocking: false,
+      userTitle: 'Ad set budget required',
+      userMessage:
+        'An explicit daily or lifetime budget is required for this ad set. The system will inherit it from the campaign and retry.',
+      nextSteps: ['Retry the command. The system will apply the campaign budget automatically.'],
+      rationale: 'The ad set request is valid except for a missing budget parameter.',
+      debug: { raw, code, subcode, fbtraceId, requestId: parsed.requestId },
+    };
+  }
+
+  if (
+    normalized.includes('bid amount required') ||
+    normalized.includes('bid_amount') ||
+    (subcode !== undefined && Number(subcode) === 1815857)
+  ) {
     return {
       category: 'bid_required',
       blocking: false,
@@ -164,10 +182,10 @@ export function normalizeExecutionError(error: unknown): NormalizedExecutionErro
   }
 
   if (
-    normalized.includes('permission') ||
+    (code !== undefined && Number(code) === 10) ||
     normalized.includes('not authorized') ||
     normalized.includes('insufficient permission') ||
-    normalized.includes('code=10')
+    normalized.includes('does not have permission')
   ) {
     return {
       category: 'permissions',
