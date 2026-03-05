@@ -45,6 +45,7 @@ import { normalizeAdAccountId, normalizePageId, TenantRegistry } from './core/te
 import type { RequestContext } from './core/types.js';
 import { DbTokenProvider, EnvTokenProvider, CompositeTokenProvider } from './core/token-provider.js';
 import { InsightsApi } from './insights.js';
+import { MediaApi, type UploadAdImageParams, type UploadAdImageResult, type UploadAdVideoParams, type UploadAdVideoResult } from './media.js';
 import { PixelsApi, type FacebookPixel } from './pixels.js';
 import { TargetingApi } from './targeting.js';
 import { AuditLogService } from '../services/audit-log-service.js';
@@ -81,6 +82,7 @@ export class FacebookServiceFacade {
   private readonly adsApi: AdsApi;
   private readonly insightsApi: InsightsApi;
   private readonly pixelsApi: PixelsApi;
+  private readonly mediaApi: MediaApi;
   private readonly auditLogService: AuditLogService;
   private readonly dsaService: DsaService;
 
@@ -114,6 +116,7 @@ export class FacebookServiceFacade {
     this.adsApi = new AdsApi(this.graphClient, pageResolver, this.dsaService);
     this.insightsApi = new InsightsApi(this.graphClient, this.env.insightsCacheTtlMs);
     this.pixelsApi = new PixelsApi(this.graphClient);
+    this.mediaApi = new MediaApi(this.graphClient);
   }
 
   getTenantRegistry(): TenantRegistry {
@@ -977,6 +980,50 @@ export class FacebookServiceFacade {
       );
       throw error;
     }
+  }
+
+  async uploadAdImage(params: UploadAdImageParams): Promise<UploadAdImageResult> {
+    const actor = await this.requireActor(params, 'upload_ad_image');
+    const accountId = normalizeAdAccountId(params.accountId);
+    await this.tenantRegistry.assertAdAccountAllowed(
+      actor.tenantId,
+      accountId,
+      actor.userId,
+      actor.isPlatformAdmin
+    );
+    const ctx = this.buildContext(actor, { adAccountId: accountId });
+    const result = await this.mediaApi.uploadAdImage(ctx, params);
+    await this.logMutation(
+      actor,
+      'upload_ad_image',
+      accountId,
+      `Uploaded ad image to ${accountId}`,
+      AuditResult.SUCCESS,
+      { imageHash: result.imageHash }
+    );
+    return result;
+  }
+
+  async uploadAdVideo(params: UploadAdVideoParams): Promise<UploadAdVideoResult> {
+    const actor = await this.requireActor(params, 'upload_ad_video');
+    const accountId = normalizeAdAccountId(params.accountId);
+    await this.tenantRegistry.assertAdAccountAllowed(
+      actor.tenantId,
+      accountId,
+      actor.userId,
+      actor.isPlatformAdmin
+    );
+    const ctx = this.buildContext(actor, { adAccountId: accountId });
+    const result = await this.mediaApi.uploadAdVideo(ctx, params);
+    await this.logMutation(
+      actor,
+      'upload_ad_video',
+      accountId,
+      `Uploaded ad video to ${accountId}`,
+      AuditResult.SUCCESS,
+      { videoId: result.videoId }
+    );
+    return result;
   }
 
   private async requireActor(

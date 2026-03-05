@@ -25,7 +25,7 @@ export async function POST(request: NextRequest) {
       );
     }
     
-    return material ? material.fileUrl : null;
+    return material ? (material.filePath || material.fileUrl) : null;
   }
 
   // Helper function to parse material assignments from command text

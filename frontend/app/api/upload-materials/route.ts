@@ -5,6 +5,8 @@ import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { AuthRequiredError, TenantAccessError, resolveTenantContext } from '@/lib/tenant-context';
 
+const UPLOADS_DIR = path.resolve(process.cwd(), '..', 'uploads');
+
 export async function POST(request: NextRequest) {
   try {
     const context = await resolveTenantContext(request);
@@ -20,7 +22,6 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Validate file type
     const allowedImageTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif'];
     const allowedVideoTypes = ['video/mp4', 'video/mov', 'video/avi'];
     const allAllowedTypes = [...allowedImageTypes, ...allowedVideoTypes];
@@ -35,37 +36,26 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Create uploads directory if it doesn't exist
-    const uploadsDir = path.join(process.cwd(), 'public', 'uploads');
-    if (!existsSync(uploadsDir)) {
-      await mkdir(uploadsDir, { recursive: true });
+    if (!existsSync(UPLOADS_DIR)) {
+      await mkdir(UPLOADS_DIR, { recursive: true });
     }
 
-    // Generate filename with accountName prefix (no UUID)
     const fileExtension = path.extname(file.name);
     const baseFilename = path.basename(file.name, fileExtension);
     let uniqueFilename = `${context.tenantId}_${adName}_${baseFilename}${fileExtension}`;
-    let filePath = path.join(uploadsDir, uniqueFilename);
+    let filePath = path.join(UPLOADS_DIR, uniqueFilename);
     
-    // Handle file name conflicts by adding counter
     let counter = 1;
     while (existsSync(filePath)) {
       uniqueFilename = `${context.tenantId}_${adName}_${baseFilename}_${counter}${fileExtension}`;
-      filePath = path.join(uploadsDir, uniqueFilename);
+      filePath = path.join(UPLOADS_DIR, uniqueFilename);
       counter++;
     }
 
-    // Convert file to buffer and save
     const bytes = await file.arrayBuffer();
     const buffer = Buffer.from(bytes);
     await writeFile(filePath, buffer);
 
-    // Create the URL for accessing the file
-    const baseUrl = process.env.NGROK_URL || 'http://localhost:3000';
-    const relativeUrl = `/uploads/${uniqueFilename}`;
-    const fileUrl = `${baseUrl}${relativeUrl}`;
-
-    // Determine material category
     const isImage = allowedImageTypes.includes(file.type);
     const isVideo = allowedVideoTypes.includes(file.type);
 
@@ -73,9 +63,9 @@ export async function POST(request: NextRequest) {
       id: uuidv4(),
       filename: uniqueFilename,
       originalName: file.name,
-      fileUrl: fileUrl,
-      localPath: relativeUrl,
-      fullPath: filePath,
+      fileUrl: `/uploads/${uniqueFilename}`,
+      filePath: filePath,
+      localPath: `/uploads/${uniqueFilename}`,
       type: materialType,
       mimeType: file.type,
       size: file.size,
@@ -111,15 +101,10 @@ export async function POST(request: NextRequest) {
 export async function GET(request: NextRequest) {
   try {
     await resolveTenantContext(request);
-    // Return list of uploaded materials
-    const { searchParams } = new URL(request.url);
-    const adName = searchParams.get('adName');
-
-    // For now, return empty array - could implement file listing later
     return NextResponse.json({
       success: true,
       materials: [],
-      message: 'Materials listing endpoint - implement file scanning if needed'
+      message: 'Use GET /api/get-materials for material listing'
     });
 
   } catch (error) {

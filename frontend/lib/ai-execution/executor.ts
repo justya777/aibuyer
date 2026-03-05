@@ -595,7 +595,6 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
 
         if (toolCall.function.name === 'create_ad' && toolArgs.creative) {
           const creative = toolArgs.creative;
-          const ngrokUrl = process.env.NGROK_URL || 'https://8ef9dec79365.ngrok-free.app';
           if (creative.linkUrl && creative.linkUrl.includes('?')) {
             const parsed = parseTrackingUrl(creative.linkUrl);
             creative.linkUrl = parsed.websiteUrl;
@@ -630,60 +629,55 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
             }
           }
 
-          if (
-            creative.imageUrl &&
-            !creative.imageUrl.includes(ngrokUrl) &&
-            !creative.imageUrl.includes('localhost:3000')
-          ) {
-            if (imageFromMaterials) {
-              creative.imageUrl = imageFromMaterials.fileUrl;
-              pushFix('Replaced invalid image URL with uploaded material URL.');
-            } else {
-              delete creative.imageUrl;
-              pushFix('Removed invalid image URL from ad creative payload.');
-            }
-          }
+          delete creative.imageUrl;
+          delete creative.videoUrl;
 
-          if (
-            creative.videoUrl &&
-            !creative.videoUrl.includes(ngrokUrl) &&
-            !creative.videoUrl.includes('localhost:3000')
-          ) {
-            if (videoFromMaterials) {
-              creative.videoUrl = videoFromMaterials.fileUrl;
-              pushFix('Replaced invalid video URL with uploaded material URL.');
-            } else {
-              delete creative.videoUrl;
-              pushFix('Removed invalid video URL from ad creative payload.');
-            }
-          }
+          const targetMaterial = preferVideo
+            ? (videoFromMaterials || imageFromMaterials)
+            : (imageFromMaterials || videoFromMaterials);
 
-          if (typeof creative.imageUrl === 'string' && creative.imageUrl.endsWith('.mp4')) {
-            creative.videoUrl = creative.imageUrl;
-            delete creative.imageUrl;
-            pushFix('Moved MP4 media from image slot to video slot.');
-          }
+          if (targetMaterial && targetMaterial.filePath) {
+            try {
+              if (targetMaterial.category === 'video') {
+                const uploadResult = await mcpClient.callTool('upload_ad_video', {
+                  tenantId,
+                  accountId,
+                  filePath: targetMaterial.filePath,
+                  title: targetMaterial.originalName || targetMaterial.filename,
+                });
+                const videoResult = typeof uploadResult === 'string' ? JSON.parse(uploadResult) : uploadResult;
+                creative.videoId = videoResult.videoId;
+                pushFix(`Uploaded video to Facebook (video_id: ${videoResult.videoId}).`);
 
-          if (!creative.imageUrl && !creative.videoUrl) {
-            if (preferVideo && videoFromMaterials) {
-              creative.videoUrl = videoFromMaterials.fileUrl;
-              pushFix('Added video creative from uploaded materials.');
-            } else if (imageFromMaterials) {
-              creative.imageUrl = imageFromMaterials.fileUrl;
-              pushFix('Added image creative from uploaded materials.');
-            } else if (videoFromMaterials) {
-              creative.videoUrl = videoFromMaterials.fileUrl;
-              pushFix('Added video creative from uploaded materials.');
-            }
-          }
-
-          if (creative.videoUrl && !creative.imageUrl) {
-            const thumbnailImage =
-              commandMaterials.find((m: any) => m.category === 'image') ||
-              availableMaterials.find((m: any) => m.category === 'image');
-            if (thumbnailImage) {
-              creative.imageUrl = thumbnailImage.fileUrl;
-              pushFix('Added thumbnail image required for video ad.');
+                const thumbnailImage =
+                  commandMaterials.find((m: any) => m.category === 'image') ||
+                  availableMaterials.find((m: any) => m.category === 'image');
+                if (thumbnailImage && thumbnailImage.filePath) {
+                  try {
+                    const thumbResult = await mcpClient.callTool('upload_ad_image', {
+                      tenantId,
+                      accountId,
+                      filePath: thumbnailImage.filePath,
+                    });
+                    const thumbData = typeof thumbResult === 'string' ? JSON.parse(thumbResult) : thumbResult;
+                    creative.imageHash = thumbData.imageHash;
+                    pushFix('Uploaded thumbnail image for video ad.');
+                  } catch {
+                    pushFix('Could not upload thumbnail for video ad.');
+                  }
+                }
+              } else {
+                const uploadResult = await mcpClient.callTool('upload_ad_image', {
+                  tenantId,
+                  accountId,
+                  filePath: targetMaterial.filePath,
+                });
+                const imageResult = typeof uploadResult === 'string' ? JSON.parse(uploadResult) : uploadResult;
+                creative.imageHash = imageResult.imageHash;
+                pushFix(`Uploaded image to Facebook (image_hash: ${imageResult.imageHash}).`);
+              }
+            } catch (uploadError) {
+              pushFix(`Media upload failed: ${uploadError instanceof Error ? uploadError.message : 'unknown error'}`);
             }
           }
 
@@ -965,12 +959,10 @@ export async function runAiExecution(input: RunAiExecutionInput): Promise<RunAiE
         const assignedMaterial = materialAssignmentsList.find((a) => a.adIndex === adsCreated);
         let materialInstruction = '';
         if (assignedMaterial) {
-          const materialType = assignedMaterial.material.category === 'video' ? 'videoUrl' : 'imageUrl';
-          materialInstruction = ` Use ${assignedMaterial.filename} (${materialType}: ${assignedMaterial.material.fileUrl}) for this ad's creative.`;
+          materialInstruction = ` Use material "${assignedMaterial.filename}" (${assignedMaterial.material.category}) for this ad's creative.`;
         } else if (commandMaterials[adsCreated]) {
           const mat = commandMaterials[adsCreated];
-          const materialType = mat.category === 'video' ? 'videoUrl' : 'imageUrl';
-          materialInstruction = ` Use ${mat.originalName} (${materialType}: ${mat.fileUrl}) for this ad's creative.`;
+          materialInstruction = ` Use material "${mat.originalName}" (${mat.category}) for this ad's creative.`;
         }
         messages.push({
           role: 'user',
@@ -1089,22 +1081,22 @@ function cloneStep(step: ExecutionStep): ExecutionStep {
 
 function buildMaterialsInfo(commandMaterials: any[], availableMaterials: any[]): string {
   if (commandMaterials.length > 0) {
-    return `\n\n📎 MATERIALS AVAILABLE FOR USE (Auto-Select Mode):\n${commandMaterials
+    return `\n\nMATERIALS AVAILABLE FOR USE (will be uploaded to Facebook automatically):\n${commandMaterials
       .map(
         (m: any) =>
-          `- ${m.originalName} (${m.category.toUpperCase()}) → URL: ${m.fileUrl}`
+          `- ${m.originalName} (${m.category.toUpperCase()})`
       )
-      .join('\n')}`;
+      .join('\n')}\nDo NOT set imageUrl or videoUrl in the creative. The system will upload materials and attach them automatically.`;
   }
   if (availableMaterials.length > 0) {
-    return `\n\n📎 AVAILABLE MATERIALS:\n${availableMaterials
+    return `\n\nAVAILABLE MATERIALS (will be uploaded to Facebook automatically):\n${availableMaterials
       .map(
         (m: any) =>
-          `- ${m.originalName} (${m.category.toUpperCase()}) → URL: ${m.fileUrl}`
+          `- ${m.originalName} (${m.category.toUpperCase()})`
       )
-      .join('\n')}`;
+      .join('\n')}\nDo NOT set imageUrl or videoUrl in the creative. The system will upload materials and attach them automatically.`;
   }
-  return '\n\n📎 No materials available. Create ads without images/videos or ask user to upload materials first.';
+  return '\n\nNo materials available. Create ads without images/videos or ask user to upload materials first.';
 }
 
 function buildMaterialAssignmentsList(command: string, commandMaterials: any[], requestedAdCount: number) {

@@ -31,6 +31,8 @@ import {
   UpdateAdSchema,
   UpdateAdSetSchema,
   UpdateCampaignSchema,
+  UploadAdImageSchema,
+  UploadAdVideoSchema,
 } from './tools.js';
 
 function parseArgs<T extends z.ZodTypeAny>(schema: T, args: unknown): z.infer<T> {
@@ -165,6 +167,14 @@ export class FacebookToolHandlers {
       case 'duplicate_ad': {
         const parsed = parseArgs(DuplicateAdSchema, args);
         return this.facebookService.duplicateAd(parsed.adId, parsed);
+      }
+      case 'upload_ad_image': {
+        const parsed = parseArgs(UploadAdImageSchema, args);
+        return this.facebookService.uploadAdImage(parsed);
+      }
+      case 'upload_ad_video': {
+        const parsed = parseArgs(UploadAdVideoSchema, args);
+        return this.facebookService.uploadAdVideo(parsed);
       }
       default:
         throw new Error(`Unknown tool: ${toolName}`);

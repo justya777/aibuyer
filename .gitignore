@@ -4,7 +4,6 @@ node_modules/
 !.env.example
 !.env.local.template
 .DS_Store
-ngrok.log
 *.log
 dist/
 build/

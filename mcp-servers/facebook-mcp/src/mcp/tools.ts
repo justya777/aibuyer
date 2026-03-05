@@ -226,7 +226,9 @@ export const CreateAdSchema = z.object({
     title: z.string().optional(),
     body: z.string().optional(),
     imageUrl: z.string().optional(),
+    imageHash: z.string().optional(),
     videoUrl: z.string().optional(),
+    videoId: z.string().optional(),
     linkUrl: z.string().optional(),
     callToAction: z.string().optional(),
     displayLink: z.string().optional(),
@@ -245,7 +247,9 @@ export const UpdateAdSchema = z.object({
       title: z.string().optional(),
       body: z.string().optional(),
       imageUrl: z.string().optional(),
+      imageHash: z.string().optional(),
       videoUrl: z.string().optional(),
+      videoId: z.string().optional(),
       linkUrl: z.string().optional(),
       callToAction: z.string().optional(),
       displayLink: z.string().optional(),
@@ -293,6 +297,21 @@ export const GetAdAccountPixelsSchema = z.object({
   tenantId: tenantIdRequired,
   ...actorFields,
   accountId: z.string(),
+});
+
+export const UploadAdImageSchema = z.object({
+  tenantId: tenantIdRequired,
+  ...actorFields,
+  accountId: z.string(),
+  filePath: z.string(),
+});
+
+export const UploadAdVideoSchema = z.object({
+  tenantId: tenantIdRequired,
+  ...actorFields,
+  accountId: z.string(),
+  filePath: z.string(),
+  title: z.string().optional(),
 });
 
 export const DuplicateAdSchema = z.object({
@@ -737,6 +756,33 @@ export const tools: Tool[] = [
     },
   },
   {
+    name: 'upload_ad_image',
+    description: 'Upload an image file from the server to a Facebook ad account. Returns image_hash for use in ad creatives.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tenantId: { type: 'string', description: 'Tenant ID for authorization and isolation checks' },
+        accountId: { type: 'string', description: 'Ad account ID (act_XXX)' },
+        filePath: { type: 'string', description: 'Path to the image file on the server (relative to uploads dir or absolute)' },
+      },
+      required: ['tenantId', 'accountId', 'filePath'],
+    },
+  },
+  {
+    name: 'upload_ad_video',
+    description: 'Upload a video file from the server to a Facebook ad account. Returns video_id for use in ad creatives.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tenantId: { type: 'string', description: 'Tenant ID for authorization and isolation checks' },
+        accountId: { type: 'string', description: 'Ad account ID (act_XXX)' },
+        filePath: { type: 'string', description: 'Path to the video file on the server (relative to uploads dir or absolute)' },
+        title: { type: 'string', description: 'Optional video title' },
+      },
+      required: ['tenantId', 'accountId', 'filePath'],
+    },
+  },
+  {
     name: 'duplicate_ad',
     description: 'Duplicate an ad using Facebook native endpoint',
     inputSchema: {
@@ -782,6 +828,8 @@ export const toolSchemas = {
   duplicate_campaign: DuplicateCampaignSchema,
   duplicate_adset: DuplicateAdSetSchema,
   duplicate_ad: DuplicateAdSchema,
+  upload_ad_image: UploadAdImageSchema,
+  upload_ad_video: UploadAdVideoSchema,
 };
 
 export type ToolName = keyof typeof toolSchemas;

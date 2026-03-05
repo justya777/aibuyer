@@ -271,19 +271,49 @@ export class AdsApi {
       throw new Error('Select a default Page for this ad account');
     }
 
+    if (creative.videoId) {
+      const videoData: Record<string, unknown> = {
+        video_id: creative.videoId,
+        message: creative.body || 'Check this out!',
+        title: creative.title || params.name,
+        link_description: creative.body || '',
+        call_to_action: {
+          type: creative.callToAction || 'LEARN_MORE',
+          value: { link: creative.linkUrl },
+        },
+      };
+      if (creative.imageHash) {
+        videoData.image_hash = creative.imageHash;
+      }
+      return {
+        object_story_spec: {
+          page_id: pageId,
+          video_data: videoData,
+        },
+        url_tags: creative.urlParameters,
+      };
+    }
+
+    const linkData: Record<string, unknown> = {
+      link: creative.linkUrl,
+      message: creative.body || 'Check this out!',
+      name: creative.title || params.name,
+      description: creative.body || '',
+      call_to_action: {
+        type: creative.callToAction || 'LEARN_MORE',
+      },
+    };
+
+    if (creative.imageHash) {
+      linkData.image_hash = creative.imageHash;
+    } else if (creative.imageUrl) {
+      linkData.picture = creative.imageUrl;
+    }
+
     return {
       object_story_spec: {
         page_id: pageId,
-        link_data: {
-          link: creative.linkUrl,
-          message: creative.body || 'Check this out!',
-          name: creative.title || params.name,
-          description: creative.body || '',
-          call_to_action: {
-            type: creative.callToAction || 'LEARN_MORE',
-          },
-          picture: creative.imageUrl,
-        },
+        link_data: linkData,
       },
       url_tags: creative.urlParameters,
     };

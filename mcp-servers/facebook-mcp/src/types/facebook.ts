@@ -299,7 +299,9 @@ export interface CreateAdParams extends TenantRequired {
     title?: string;
     body?: string;
     imageUrl?: string;
+    imageHash?: string;
     videoUrl?: string;
+    videoId?: string;
     linkUrl?: string;
     urlParameters?: string;
     callToAction?: string;
@@ -316,7 +318,9 @@ export interface UpdateAdParams extends TenantRequired {
     title?: string;
     body?: string;
     imageUrl?: string;
+    imageHash?: string;
     videoUrl?: string;
+    videoId?: string;
     linkUrl?: string;
     urlParameters?: string;
     callToAction?: string;
