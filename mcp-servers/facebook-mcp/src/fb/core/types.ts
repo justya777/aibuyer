@@ -1,5 +1,6 @@
 export interface RequestContext {
   tenantId: string;
+  businessId?: string;
   userId?: string;
   isPlatformAdmin?: boolean;
   adAccountId?: string;

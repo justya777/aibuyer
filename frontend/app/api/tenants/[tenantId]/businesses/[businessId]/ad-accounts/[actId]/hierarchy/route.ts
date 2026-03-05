@@ -295,6 +295,7 @@ export async function GET(
 
     const mcpClient = new MCPClient({
       tenantId,
+      businessId,
       userId: context.userId,
       isPlatformAdmin: context.isPlatformAdmin,
     });

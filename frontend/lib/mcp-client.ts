@@ -3,11 +3,12 @@ export class MCPClient {
   private static readonly TOOL_TIMEOUT_MS = 90_000;
   private readonly context: {
     tenantId: string;
+    businessId?: string;
     userId?: string;
     isPlatformAdmin?: boolean;
   };
 
-  constructor(context: { tenantId: string; userId?: string; isPlatformAdmin?: boolean }) {
+  constructor(context: { tenantId: string; businessId?: string; userId?: string; isPlatformAdmin?: boolean }) {
     this.context = context;
   }
 
@@ -17,11 +18,13 @@ export class MCPClient {
         ? {
             ...params,
             tenantId: this.context.tenantId,
+            businessId: params.businessId || this.context.businessId,
             userId: this.context.userId,
             isPlatformAdmin: this.context.isPlatformAdmin,
           }
         : {
             tenantId: this.context.tenantId,
+            businessId: this.context.businessId,
             userId: this.context.userId,
             isPlatformAdmin: this.context.isPlatformAdmin,
           };

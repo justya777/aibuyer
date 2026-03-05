@@ -25,6 +25,7 @@ export class DbTokenProvider implements TokenProvider {
     const credential = await prisma.metaCredential.findFirst({
       where: {
         tenantId: ctx.tenantId,
+        ...(ctx.businessId ? { businessId: ctx.businessId } : {}),
         revokedAt: null,
       },
       orderBy: { createdAt: 'desc' },

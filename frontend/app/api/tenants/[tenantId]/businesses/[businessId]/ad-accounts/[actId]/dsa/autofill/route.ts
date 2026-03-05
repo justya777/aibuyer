@@ -130,6 +130,7 @@ export async function POST(
     const resolvedPageId = body.pageId || settings?.defaultPageId || undefined;
     const mcpClient = new MCPClient({
       tenantId,
+      businessId,
       userId: context.userId,
       isPlatformAdmin: context.isPlatformAdmin,
     });

@@ -64,6 +64,7 @@ interface FacadeDependencies {
 
 interface ActorContext {
   tenantId: string;
+  businessId?: string;
   userId?: string;
   isPlatformAdmin?: boolean;
 }
@@ -979,7 +980,7 @@ export class FacebookServiceFacade {
   }
 
   private async requireActor(
-    params: { tenantId?: string; userId?: string; isPlatformAdmin?: boolean },
+    params: { tenantId?: string; userId?: string; isPlatformAdmin?: boolean; businessId?: string },
     toolName: string
   ): Promise<ActorContext> {
     const tenantId = params.tenantId?.trim();
@@ -993,6 +994,7 @@ export class FacebookServiceFacade {
     );
     return {
       tenantId,
+      businessId: params.businessId?.trim() || undefined,
       userId: params.userId,
       isPlatformAdmin: params.isPlatformAdmin,
     };
@@ -1078,6 +1080,7 @@ export class FacebookServiceFacade {
   ): RequestContext {
     return {
       tenantId: actor.tenantId,
+      businessId: actor.businessId,
       userId: actor.userId,
       isPlatformAdmin: actor.isPlatformAdmin,
       ...extras,

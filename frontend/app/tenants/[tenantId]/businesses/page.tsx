@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { FormEvent, useCallback, useEffect, useState } from 'react';
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 
 type BusinessSummary = {
   tenantId: string;
@@ -20,6 +20,7 @@ type BusinessSummary = {
 
 export default function TenantBusinessesPage() {
   const params = useParams<{ tenantId: string }>();
+  const router = useRouter();
   const tenantId = params.tenantId;
   const [businesses, setBusinesses] = useState<BusinessSummary[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -80,7 +81,7 @@ export default function TenantBusinessesPage() {
       setBusinessIdInput('');
       setLabelInput('');
       setAccessTokenInput('');
-      await loadBusinesses();
+      router.push(`/tenants/${tenantId}/businesses/${encodeURIComponent(payload.business.businessId)}`);
     } catch (addError) {
       setError(addError instanceof Error ? addError.message : 'Failed to add Business Portfolio.');
     } finally {

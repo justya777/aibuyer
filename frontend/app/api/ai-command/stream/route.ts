@@ -392,7 +392,7 @@ export async function GET(request: NextRequest) {
           }
 
           const openai = getOpenAIClient();
-          mcpClient = new MCPClient(context);
+          mcpClient = new MCPClient({ ...context, businessId: currentSession.businessId });
           const result = await runAiExecution({
             openai,
             mcpClient,

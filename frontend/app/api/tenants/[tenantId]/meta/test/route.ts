@@ -29,8 +29,9 @@ export async function GET(
       throw new TenantAccessError('Tenant access denied.');
     }
 
+    const businessId = request.nextUrl.searchParams.get('businessId') || undefined;
     const credential = await db.metaCredential.findFirst({
-      where: { tenantId, revokedAt: null },
+      where: { tenantId, ...(businessId ? { businessId } : {}), revokedAt: null },
       orderBy: { createdAt: 'desc' },
       select: {
         tokenEncrypted: true,

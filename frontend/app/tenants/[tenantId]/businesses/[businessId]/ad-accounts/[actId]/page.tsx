@@ -41,6 +41,7 @@ export default function BusinessAdAccountDetailPage() {
   const [pixelListLoading, setPixelListLoading] = useState(false);
   const [pixelSaving, setPixelSaving] = useState(false);
   const inflightRef = useRef<AbortController | null>(null);
+  const activeExecutionRef = useRef(false);
 
   const load = useCallback(async () => {
     if (!tenantId || !businessId || !actId) return;
@@ -113,6 +114,7 @@ export default function BusinessAdAccountDetailPage() {
 
   useEffect(() => {
     if (!tenantId || !businessId || !actId) return;
+    if (activeExecutionRef.current) return;
     if (executionSteps.length > 0 || executionSummary) return;
     const run = async () => {
       try {
@@ -468,6 +470,7 @@ export default function BusinessAdAccountDetailPage() {
                 )}?openDsaFor=${encodeURIComponent(adAccountId)}`;
               }}
               onExecutionReset={() => {
+                activeExecutionRef.current = true;
                 setExecutionSteps([]);
                 setExecutionSummary(null);
                 setCreatedSummary(null);
@@ -485,8 +488,12 @@ export default function BusinessAdAccountDetailPage() {
               }
               onSummary={(summary) => {
                 setExecutionSummary(summary);
+                if (summary.finalStatus === 'error' || summary.finalStatus === 'success') {
+                  activeExecutionRef.current = false;
+                }
               }}
               onExecutionComplete={(result) => {
+                activeExecutionRef.current = false;
                 const cId = result.createdIds?.campaignId;
                 const asId = result.createdIds?.adSetId || result.createdIds?.adSetIds?.[0];
                 const aId = result.createdIds?.adId || result.createdIds?.adIds?.[0];

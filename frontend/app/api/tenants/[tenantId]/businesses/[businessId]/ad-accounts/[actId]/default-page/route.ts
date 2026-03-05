@@ -95,6 +95,7 @@ export async function PUT(
 
     const mcpClient = new MCPClient({
       tenantId,
+      businessId,
       userId: context.userId,
       isPlatformAdmin: context.isPlatformAdmin,
     });

@@ -121,6 +121,8 @@ export default function BusinessPortfolioDetailPage() {
   const [pixelsByAccount, setPixelsByAccount] = useState<Record<string, PixelRow[]>>({});
   const [pixelLoadingFor, setPixelLoadingFor] = useState<string | null>(null);
   const [pixelUpdatingFor, setPixelUpdatingFor] = useState<string | null>(null);
+  const [removingAdAccount, setRemovingAdAccount] = useState<string | null>(null);
+  const [removingPage, setRemovingPage] = useState<string | null>(null);
   const openDsaFor = searchParams.get('openDsaFor');
 
   const loadData = useCallback(async () => {
@@ -286,6 +288,56 @@ export default function BusinessPortfolioDetailPage() {
       setError(syncError instanceof Error ? syncError.message : 'Failed to sync business assets.');
     } finally {
       setIsSyncing(false);
+    }
+  }
+
+  async function handleRemoveAdAccount(adAccountId: string, adAccountName: string): Promise<void> {
+    if (!tenantId || !businessId) return;
+    if (!window.confirm(`Remove ad account "${adAccountName}" (${adAccountId}) from this business portfolio? It will be detached but not deleted.`)) return;
+    setRemovingAdAccount(adAccountId);
+    setError(null);
+    try {
+      const resp = await fetch(
+        `/api/tenants/${tenantId}/businesses/${encodeURIComponent(businessId)}/ad-accounts/${encodeURIComponent(adAccountId)}`,
+        {
+          method: 'DELETE',
+          headers: { 'x-tenant-id': tenantId },
+        }
+      );
+      const data = await resp.json();
+      if (!resp.ok || !data.success) {
+        throw new Error(data.error || 'Failed to remove ad account.');
+      }
+      setAdAccounts((prev) => prev.filter((a) => a.adAccountId !== adAccountId));
+    } catch (removeError) {
+      setError(removeError instanceof Error ? removeError.message : 'Failed to remove ad account.');
+    } finally {
+      setRemovingAdAccount(null);
+    }
+  }
+
+  async function handleRemovePage(pageId: string, pageName: string): Promise<void> {
+    if (!tenantId || !businessId) return;
+    if (!window.confirm(`Remove page "${pageName}" (${pageId}) from this business portfolio? It will be detached but not deleted.`)) return;
+    setRemovingPage(pageId);
+    setError(null);
+    try {
+      const resp = await fetch(
+        `/api/tenants/${tenantId}/businesses/${encodeURIComponent(businessId)}/pages/${encodeURIComponent(pageId)}`,
+        {
+          method: 'DELETE',
+          headers: { 'x-tenant-id': tenantId },
+        }
+      );
+      const data = await resp.json();
+      if (!resp.ok || !data.success) {
+        throw new Error(data.error || 'Failed to remove page.');
+      }
+      setPages((prev) => prev.filter((p) => p.pageId !== pageId));
+    } catch (removeError) {
+      setError(removeError instanceof Error ? removeError.message : 'Failed to remove page.');
+    } finally {
+      setRemovingPage(null);
     }
   }
 
@@ -579,6 +631,14 @@ export default function BusinessPortfolioDetailPage() {
                       >
                         Open
                       </Link>
+                      <button
+                        type="button"
+                        className="px-2 py-1 border border-red-300 rounded text-red-600 hover:bg-red-50 disabled:opacity-50"
+                        disabled={removingAdAccount === account.adAccountId}
+                        onClick={() => void handleRemoveAdAccount(account.adAccountId, account.name)}
+                      >
+                        {removingAdAccount === account.adAccountId ? 'Removing...' : 'Remove'}
+                      </button>
                     </td>
                   </tr>
                 ))}
@@ -599,6 +659,7 @@ export default function BusinessPortfolioDetailPage() {
                   <th className="py-2 pr-4">Page</th>
                   <th className="py-2 pr-4">Source</th>
                   <th className="py-2 pr-4">Set as Default</th>
+                  <th className="py-2 pr-4">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -646,6 +707,16 @@ export default function BusinessPortfolioDetailPage() {
                           Set Default
                         </button>
                       </div>
+                    </td>
+                    <td className="py-2 pr-4">
+                      <button
+                        type="button"
+                        className="px-2 py-1 border border-red-300 rounded text-red-600 hover:bg-red-50 disabled:opacity-50"
+                        disabled={removingPage === page.pageId}
+                        onClick={() => void handleRemovePage(page.pageId, page.name)}
+                      >
+                        {removingPage === page.pageId ? 'Removing...' : 'Remove'}
+                      </button>
                     </td>
                   </tr>
                 ))}

@@ -23,7 +23,7 @@ export async function GET(
 ) {
   try {
     const context = await resolveTenantContext(request);
-    const { tenantId, actId } = params;
+    const { tenantId, businessId, actId } = params;
     if (context.tenantId !== tenantId) {
       return NextResponse.json({ error: 'Tenant mismatch' }, { status: 403 });
     }
@@ -46,7 +46,7 @@ export async function GET(
 
     let mcpClient: MCPClient | null = null;
     try {
-      mcpClient = new MCPClient(context);
+      mcpClient = new MCPClient({ ...context, businessId });
       const result = await mcpClient.callTool('get_ad_account_pixels', { accountId: adAccountId });
       const fetched = Array.isArray(result) ? result : [];
 

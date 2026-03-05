@@ -9,7 +9,7 @@ export const TTL = {
   DEFAULT: 60_000,
 } as const;
 
-const DEFAULT_TTL_MS = TTL.DEFAULT;
+const DEFAULT_TTL_MS: number = TTL.DEFAULT;
 
 const globalKey = '__apiCacheStore';
 const cooldownKey = '__apiCooldownStore';
